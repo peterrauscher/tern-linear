@@ -1,0 +1,21 @@
+{
+  "name": "tern-linear",
+  "version": "0.1.0",
+  "description": "Linear issues as a native Tern block",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "sh scripts/typecheck.sh",
+    "format": "sh scripts/format.sh",
+    "format:check": "sh scripts/format.sh --check",
+    "test:unit": "sh scripts/unit.sh",
+    "test:queries": "bun test/validate-queries.mjs",
+    "test:e2e": "bun test/e2e.mjs",
+    "smoke:live": "bun test/live-smoke.mjs",
+    "check": "bun run format:check && bun run typecheck && bun run test:unit && bun run test:queries && bun run test:e2e"
+  },
+  "devDependencies": {
+    "graphql": "^17.1.0"
+  }
+}

@@ -1,0 +1,13 @@
+schema = 1
+id = "linear"
+name = "Linear"
+version = "0.1.0"
+description = "Your Linear issues as a native Tern board: views, search, details, comments and edits."
+icon = "kanban"
+host = "host.luau"
+styles = ["styles/linear.css", "styles/detail.css"]
+
+[[blocks]]
+id = "board"
+title = "Linear"
+icon = "kanban"
