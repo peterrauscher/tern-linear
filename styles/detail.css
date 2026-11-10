@@ -1,0 +1,178 @@
+/* Drawer and create dialog of tern-linear (lib/view_detail.luau).
+ * Every rule is scoped to the plugin's layer; panels keep Tern's own surface, only their content is styled.
+ * Colours come from theme variables so the light and dark themes both work. */
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.title'] {
+	font-size: 17px;
+	line-height: 1.3;
+	font-weight: 600;
+	color: var(--t1);
+	overflow-wrap: anywhere;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.meta'] {
+	font-size: 12px;
+	color: var(--t3);
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.actions'] {
+	padding-bottom: 14px;
+	border-bottom: 1px solid var(--l2);
+}
+
+/* ── Properties: a two-column grid so every value starts at the same edge ── */
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.prop'] {
+	display: grid;
+	grid-template-columns: 10ch minmax(0, 1fr);
+	align-items: center;
+	column-gap: 8px;
+	min-height: 28px;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.prop'] > :first-child {
+	color: var(--t3);
+	font-size: 12px;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.prop'] > :last-child {
+	justify-self: start;
+	max-width: 100%;
+}
+
+/* Quiet selects pad their text; pull them left so it lines up with the plain values below. */
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.prop'] > [data-role$='-select'] {
+	margin-left: -10px;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.labels'] {
+	padding: 2px 0;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.parent'] {
+	padding: 2px 6px;
+	margin-left: -6px;
+	border-radius: var(--r-chip);
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.parent']:hover {
+	background: var(--l1);
+}
+
+/* ── Sections ───────────────────────────────────────────────────────────── */
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.heading'] {
+	font-size: 12px;
+	color: var(--t2);
+	padding-bottom: 2px;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.description'] {
+	line-height: 1.55;
+	overflow-wrap: anywhere;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.relations'],
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.children'],
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.comments'] {
+	padding-top: 14px;
+	border-top: 1px solid var(--l2);
+}
+
+/* ── Sub-issues and relations: compact, clickable rows ──────────────────── */
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.child'],
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.relation-open'] {
+	padding: 3px 6px;
+	margin: 0 -6px;
+	border-radius: var(--r-chip);
+	min-width: 0;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.child']:hover,
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.relation-open']:hover {
+	background: var(--l1);
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.relation-group-title'] {
+	font-size: 11px;
+	color: var(--t3);
+	margin-top: 4px;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.relation'] > :last-child {
+	opacity: 0.45;
+	transition: opacity 0.12s var(--ease);
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.relation']:hover > :last-child {
+	opacity: 1;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.link'] {
+	padding: 8px;
+	border-radius: var(--r-ctl);
+	box-shadow: inset 0 0 0 1px var(--l2);
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.link-mode'] {
+	font-size: 12px;
+	color: var(--t3);
+	white-space: nowrap;
+}
+
+/* ── Comments: a quiet thread ───────────────────────────────────────────── */
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.comments'] {
+	gap: 12px;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.comment-head'] {
+	gap: 8px;
+	font-size: 12px;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.comment-head'] > :last-child {
+	color: var(--t3);
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.comment-body'] {
+	line-height: 1.5;
+	overflow-wrap: anywhere;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.replies'] {
+	margin-top: 4px;
+	margin-left: 4px;
+	padding-left: 12px;
+	border-left: 2px solid var(--l2);
+	gap: 10px;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.composer'] {
+	margin-top: 4px;
+}
+
+/* ── Forms ──────────────────────────────────────────────────────────────── */
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.edit-form'] {
+	padding: 12px;
+	border-radius: var(--r-card);
+	background: var(--card);
+	box-shadow: inset 0 0 0 1px var(--l2);
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.form-field'] > :first-child {
+	font-size: 12px;
+	color: var(--t3);
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.form-error'],
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.link-error'] {
+	padding: 6px 10px;
+	border-radius: var(--r-ctl);
+	color: var(--bad);
+	background: rgb(from var(--bad) r g b / 10%);
+}

@@ -1,0 +1,171 @@
+/*
+ * Styles for lib/view.luau (the `main` region). Every rule is scoped to this plugin's surface or to a
+ * `linear.*` role, colours come from Tern's theme variables only, and `.sf-layer` is never styled here.
+ */
+
+/* ── Setup ─────────────────────────────────────────────────────────────── */
+
+[data-role='linear.setup'] {
+	margin: 6vh auto 0;
+	padding: 22px 24px 24px;
+	width: 100%;
+	background: var(--card);
+	border-radius: var(--r-panel);
+	box-shadow: inset 0 0 0 1px var(--l2);
+}
+
+[data-role='linear.setup'] > [data-mark='heading'] {
+	font-size: 18px;
+	line-height: 26px;
+}
+
+[data-role='linear.setup'] .sf-button[data-variant='primary'] {
+	align-self: flex-start;
+}
+
+[data-role='linear.setup-error'] {
+	padding: 6px 10px;
+	border-radius: var(--r-ctl);
+	background: color-mix(in srgb, var(--bad) 10%, transparent);
+}
+
+[data-role='linear.loading'] {
+	margin: 14vh auto 0;
+	align-self: center;
+}
+
+/* ── Top bar and filters ───────────────────────────────────────────────── */
+
+[data-role='linear.bar'] {
+	align-items: center;
+	row-gap: 8px;
+}
+
+/* Refresh, New issue and Sign out sit together at the bar's right edge, also when the bar wraps. */
+[data-role='linear.bar-actions'] {
+	margin-left: auto;
+}
+
+[data-role='linear.filters'] {
+	align-items: center;
+	row-gap: 4px;
+}
+
+[data-role='linear.count'] {
+	white-space: nowrap;
+}
+
+[data-role='linear.sort'] {
+	align-items: center;
+	padding-left: 2px;
+}
+
+/* ── Banners ───────────────────────────────────────────────────────────── */
+
+[data-role='linear.error'],
+[data-role='linear.notice'] {
+	align-items: flex-start;
+	padding: 8px 12px;
+	border-radius: var(--r-ctl);
+}
+
+[data-role='linear.error'] {
+	background: color-mix(in srgb, var(--bad) 10%, transparent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bad) 28%, transparent);
+}
+
+[data-role='linear.notice'] {
+	background: color-mix(in srgb, var(--ok) 10%, transparent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ok) 28%, transparent);
+}
+
+/* ── Board ─────────────────────────────────────────────────────────────── */
+
+/* Columns keep their minimum width; a narrow pane scrolls the board sideways. */
+[data-role='linear.board'] {
+	overflow-x: auto;
+	overflow-y: hidden;
+	padding-bottom: 8px;
+	scrollbar-width: thin;
+}
+
+[data-role='linear.column'] {
+	padding: 10px 8px 8px;
+	border-radius: var(--r-card);
+	background: var(--l1);
+}
+
+[data-role='linear.column-head'] {
+	align-items: center;
+	padding: 0 4px;
+}
+
+[data-role='linear.column-empty'] {
+	padding: 10px 4px;
+	text-align: center;
+}
+
+/* The state dot is an empty text node drawn as a ring (open states) or a disc (completed). */
+[data-role='linear.state-dot'] {
+	flex: none;
+	display: block;
+	width: 10px;
+	height: 10px;
+	overflow: hidden;
+	border-radius: 50%;
+	font-size: 0;
+	line-height: 0;
+	box-shadow: inset 0 0 0 2px var(--tc, var(--t3));
+}
+
+[data-role='linear.state-dot'][data-mark='started'] {
+	background: linear-gradient(90deg, var(--tc, var(--t3)) 50%, transparent 50%);
+}
+
+[data-role='linear.state-dot'][data-mark='completed'] {
+	background: var(--tc, var(--ok));
+}
+
+[data-role='linear.state-dot'][data-mark='canceled'],
+[data-role='linear.state-dot'][data-mark='duplicate'] {
+	opacity: 0.6;
+}
+
+[data-role='linear.card'] {
+	padding: 8px 10px 9px;
+	border-radius: var(--r-ctl);
+	background: var(--card);
+	box-shadow: inset 0 0 0 1px var(--l2);
+	transition: background 0.12s var(--ease), box-shadow 0.12s var(--ease);
+}
+
+[data-role='linear.card']:hover {
+	background: var(--raise);
+	box-shadow: inset 0 0 0 1px var(--l3);
+}
+
+[data-role='linear.card'][data-mark='selected'] {
+	box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+
+[data-role='linear.card-title'] {
+	line-height: 18px;
+}
+
+[data-role='linear.card'] [data-mark='label'] {
+	font-size: 11px;
+	padding-top: 0;
+	padding-bottom: 0;
+}
+
+[data-role='linear.card'] [data-mark='blocked'] {
+	font-weight: 600;
+}
+
+[data-role='linear.card-assignee'] {
+	flex: none;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 12px;
+}
