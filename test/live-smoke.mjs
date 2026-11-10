@@ -32,8 +32,11 @@ const runner = createRunner(t, { dir: artifacts, title: write ? "tern-linear liv
 
 const role = (name) => `[data-role='linear.${name}']`;
 const exists = async (selector) => ((await t.tree(selector)).nodes ?? []).length > 0;
-const present = (selector, timeout) => waitFor(() => exists(selector), { what: `${selector} to appear`, timeout });
-const absent = (selector) => waitFor(async () => !(await exists(selector)), { what: `${selector} to disappear` });
+// Polling advances app time (`wait 150`): headless Tern only animates and renders as time passes.
+const present = (selector, timeout) =>
+	waitFor(async () => (await t.wait(150), exists(selector)), { what: `${selector} to appear`, timeout, interval: 0 });
+const absent = (selector) =>
+	waitFor(async () => (await t.wait(150), !(await exists(selector))), { what: `${selector} to disappear`, interval: 0 });
 const backspaces = async (count) => {
 	for (let i = 0; i < count; i += 1) await t.key("Backspace");
 };
@@ -41,6 +44,24 @@ const backspaces = async (count) => {
 async function closeDrawer() {
 	for (let attempt = 0; attempt < 4 && (await exists(role("drawer"))); attempt += 1) await t.key("Escape");
 	await absent(role("drawer"));
+}
+
+/** Number of cards once it has not changed for `quietMs` (and, while it is 0, for at least `emptyMs`). */
+async function cardCountSettled({ quietMs = 2500, emptyMs = 6000, timeout = 45_000 } = {}) {
+	const began = Date.now();
+	let count = -1;
+	let since = began;
+	for (;;) {
+		await t.wait(150);
+		const now = Date.now();
+		const current = ((await t.tree(role("card"))).nodes ?? []).length;
+		if (current !== count) {
+			count = current;
+			since = now;
+		}
+		if (now - since >= quietMs && (count > 0 || now - began >= emptyMs)) return count;
+		if (now - began > timeout) throw new Error("the board never settled");
+	}
 }
 
 async function search(query) {
@@ -56,56 +77,79 @@ async function clearSearch(length) {
 }
 
 let created;
+let hasIssues = false;
+const report = runner.report;
 
 async function scenario() {
 	await runner.step("board-loads", async (label) => {
 		await t.openBlock();
-		await waitFor(async () => IDENTIFIER.test(await t.text(role("board"))) || (await exists(role("empty"))), {
-			what: "the board to load",
-			timeout: 45_000,
-		});
+		// Loaded = the loading screen is gone and something else (board, empty state, setup or error) shows.
+		await waitFor(
+			async () => {
+				await t.wait(150);
+				if (await exists(role("loading"))) return false;
+				return (await exists(role("board"))) || (await exists(role("empty"))) || (await exists(role("setup"))) || (await exists(role("error")));
+			},
+			{ what: "the board to load", timeout: 45_000, interval: 0 },
+		);
 		if (await exists(role("setup"))) throw new Error("the plugin shows the setup screen; the API key was not picked up");
 		if (await exists(role("error"))) throw new Error(`error banner: ${(await t.text(role("error"))).slice(0, 300)}`);
 		await runner.shot(label);
 	});
 
-	await runner.step("table-view", async (label) => {
+	// "My issues / Active" can be legitimately empty, so look at everything in the first team. Switching scope
+	// reloads from the network and the empty state shows meanwhile, so wait until the card count stops changing.
+	await runner.step("team-scope-all-view", async (label) => {
+		await t.key("t");
+		await cardCountSettled();
 		await t.key("3");
-		await t.key("v");
-		await present(role("table"));
-		await waitFor(async () => IDENTIFIER.test(await t.text(role("table"))), { what: "issue identifiers in the table" });
+		const count = await cardCountSettled();
+		hasIssues = count > 0;
+		if (hasIssues) {
+			const cards = await t.text(role("card"));
+			if (!IDENTIFIER.test(cards)) throw new Error(`cards show no issue identifier: ${cards.slice(0, 200)}`);
+			console.log(`note: ${count} cards in the first team's All view`);
+		} else {
+			console.log("note: the workspace has no issues in the first team's All view; table and drawer steps are skipped");
+			report.skipped = "no issues in the first team";
+		}
 		await runner.shot(label);
-		await t.key("v");
-		await present(role("board"));
 	});
 
-	await runner.step("detail-drawer", async (label) => {
-		await t.click(role("card"));
-		await present(role("drawer"));
-		await t.expect("Comments");
-		await runner.shot(label);
-		await closeDrawer();
-	});
+	if (hasIssues) {
+		await runner.step("table-view", async (label) => {
+			await t.key("v");
+			await present(role("table"));
+			await waitFor(async () => (await t.wait(150), IDENTIFIER.test(await t.text(role("table")))), {
+				what: "issue identifiers in the table",
+				interval: 0,
+			});
+			await runner.shot(label);
+			await t.key("v");
+			await present(role("board"));
+		});
+
+		await runner.step("detail-drawer", async (label) => {
+			await t.click(role("card"));
+			await present(role("drawer"));
+			await t.waitFor(role("drawer"), "Comments");
+			await runner.shot(label);
+			await closeDrawer();
+		});
+	}
 
 	if (!write) return;
 
 	await runner.step("create-issue", async (label) => {
 		const title = `[tern-linear smoke] ${new Date().toISOString()}`;
 		created = { title };
-		await t.key("t");
-		await t.key("3");
 		await t.key("n");
 		await present(role("dialog"));
 		await t.type(title);
 		await t.key("Ctrl+Enter");
 		await absent(role("dialog"));
-		const notice = await waitFor(
-			async () => {
-				const text = await t.text(role("notice"));
-				return text.includes("Created") ? text : null;
-			},
-			{ what: "the Created notice", timeout: 30_000 },
-		);
+		await t.waitFor(role("notice"), "Created", { timeout: 30_000 });
+		const notice = await t.text(role("notice"));
 		created.identifier = IDENTIFIER.exec(notice)?.[0] ?? "(identifier not shown)";
 		await runner.shot(label);
 	});
@@ -114,13 +158,13 @@ async function scenario() {
 		const { title } = created;
 		const needle = title.slice("[tern-linear smoke] ".length);
 		await search(needle);
-		await waitFor(() => exists(role("card")), { what: "the created issue on the board", timeout: 30_000 });
+		await t.waitFor(role("card"), needle, { timeout: 30_000 });
 		await t.click(role("card"));
 		await present(role("drawer"));
 		await t.key("c");
 		await t.type("Posted by the tern-linear live smoke test.");
 		await t.key("Ctrl+Enter");
-		await t.expect("Posted by the tern-linear live smoke test.");
+		await t.waitFor(role("drawer"), "Posted by the tern-linear live smoke test.");
 		await t.key("x");
 		await present(role("reopen"));
 		await runner.shot(label);

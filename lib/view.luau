@@ -158,7 +158,7 @@ local function setupCard(state: BlockState): Node
 			key = "storage",
 			spans = {
 				ui.span(
-					"The key is stored in the plugin data folder (file mode 600). "
+					"The key is saved in the plugin data folder in a file created owner-only (umask 077). "
 						.. "LINEAR_API_KEY in Tern's environment works too.",
 					"muted"
 				),
@@ -204,6 +204,14 @@ local function loadingNode(): Node
 	})
 end
 
+-- Stands in for the board while a foreground load runs over an already-ready screen.
+local function reloadingNode(): Node
+	return ui.node("row", { key = "content", role = "linear.reloading", gap = "sm" }, {
+		ui.node("spinner", { key = "spinner", style = "braille" }),
+		ui.node("text", { key = "label", spans = { ui.span("Loading issues…", "muted") } }),
+	})
+end
+
 -- ─── Top bar ────────────────────────────────────────────────────────────────
 
 local function scopeSelect(state: BlockState): Node
@@ -214,11 +222,12 @@ local function scopeSelect(state: BlockState): Node
 	local prefs = state.prefs
 	local value = if prefs.scope == "team" and prefs.teamId ~= nil then prefs.teamId else "mine"
 	return ui.node("select", {
-		key = "team-select",
+		key = detail.controlKey("team-select", state.controlEpoch),
 		role = "linear.team-select",
 		value = value,
 		options = options,
 		variant = "field",
+		disabled = if state.busy then true else nil,
 		aria = "Scope",
 	})
 end
@@ -415,7 +424,8 @@ local function filterRow(state: BlockState, team: Team?, visibleCount: number): 
 			})
 			else nil,
 		ui.node("row", { key = "spacer", grow = 1 }),
-		ui.node("text", { key = "count", role = "linear.count", spans = summary }),
+		-- Counts of a list that is being replaced would be wrong.
+		if state.reloading then nil else ui.node("text", { key = "count", role = "linear.count", spans = summary }),
 	}, 6)
 	return ui.node("row", { key = "filters", role = "linear.filters", gap = "sm", wrap = true }, children)
 end
@@ -629,20 +639,68 @@ end
 
 -- ─── Content ────────────────────────────────────────────────────────────────
 
-local function emptyState(state: BlockState): Node
+local function emptyState(state: BlockState): { Node }
 	local filtered = filtersActive(state)
-	return ui.node("empty", {
-		key = "content",
-		role = "linear.empty",
-		variant = "center",
-		icon = if filtered then "funnel-x" else "inbox",
-		title = if filtered then "No matching issues" else "No issues in this view",
-	})
+	local prefs = state.prefs
+	local nodes: { Node } = {
+		ui.node("empty", {
+			key = "content",
+			role = "linear.empty",
+			variant = "center",
+			icon = if filtered then "funnel-x" else "inbox",
+			title = if filtered then "No matching issues" else "No issues in this view",
+		}),
+	}
+	local buttons: { Node } = {}
+	if filtered then
+		table.insert(
+			buttons,
+			ui.button("Clear filters", {
+				key = "empty-clear-filters",
+				role = "linear.empty-clear-filters",
+				icon = "funnel-x",
+				actions = { click = "clear-filters" },
+			})
+		)
+	elseif prefs.scope == "mine" and prefs.view == "active" then
+		table.insert(
+			nodes,
+			ui.node("text", {
+				key = "empty-hint",
+				role = "linear.empty-hint",
+				spans = { ui.span("Nothing assigned to you is active.", "muted") },
+			})
+		)
+		table.insert(
+			buttons,
+			ui.button("All", { key = "empty-all", role = "linear.empty-all", actions = { click = "view=all" } })
+		)
+		if #state.teams > 0 then
+			table.insert(
+				buttons,
+				ui.button("Choose team", {
+					key = "empty-team",
+					role = "linear.empty-team",
+					actions = { click = "focus-team" },
+				})
+			)
+		end
+	end
+	if #buttons > 0 then
+		table.insert(
+			nodes,
+			ui.node("row", { key = "empty-actions", role = "linear.empty-actions", gap = "sm" }, buttons)
+		)
+	end
+	return nodes
 end
 
 local function content(state: BlockState, cx: BlockCx, visible: { Issue }, team: Team?, now: number): { Node }
+	if state.reloading then
+		return { reloadingNode() }
+	end
 	if #visible == 0 then
-		return { emptyState(state) }
+		return emptyState(state)
 	end
 	if state.prefs.layout == "table" then
 		return { sortBar(state), issueTable(state, visible, now) }

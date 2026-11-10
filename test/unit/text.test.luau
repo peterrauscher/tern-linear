@@ -212,6 +212,135 @@ f = field("привет", 6)
 text.applyEdit(f, { ev = "edit", id = "main.f", from = 0, to = 6, text = "ok", cursor = 2, len = 6 })
 check("applyEdit replaces Cyrillic text", f.text == "ok" and f.cursor == 2)
 
+-- ─── safeMarkdown ───────────────────────────────────────────────────────────
+
+local function safe(s: string): string
+	return text.safeMarkdown(s)
+end
+
+check("safe: plain text is unchanged", safe("just text, no markup") == "just text, no markup")
+check(
+	"safe: Unicode text is unchanged",
+	safe("Привет, мир " .. EMOJI .. " 日本語 [ok]") == "Привет, мир " .. EMOJI .. " 日本語 [ok]"
+)
+check(
+	"safe: Unicode around a link survives",
+	safe("日本 [ссылка](https://example.com/ж) " .. EMOJI)
+		== "日本 [ссылка](https://example.com/ж) " .. EMOJI
+)
+
+-- images
+check("safe: inline image becomes a link", safe("![logo](https://x.test/a.png)") == "[🖼 logo](https://x.test/a.png)")
+check("safe: empty alt becomes Image", safe("![](https://x.test/a.png)") == "[🖼 Image](https://x.test/a.png)")
+check(
+	"safe: image title is dropped",
+	safe('see ![logo](https://x.test/a.png "Logo") here') == "see [🖼 logo](https://x.test/a.png) here"
+)
+check("safe: reference image loses its bang", safe("![logo][ref]") == "[logo][ref]")
+check("safe: collapsed reference image loses its bang", safe("![logo][]") == "[logo][]")
+check("safe: image with a disallowed target keeps only its label", safe("![logo](file:///etc/passwd)") == "🖼 logo")
+check("safe: relative image keeps only its label", safe("![](./a.png)") == "🖼 Image")
+check("safe: a lone bang is untouched", safe("wow! [a](https://x.test)") == "wow! [a](https://x.test)")
+
+-- links
+check("safe: http link is kept", safe("[a](http://x.test/p?q=1#f)") == "[a](http://x.test/p?q=1#f)")
+check("safe: https link is kept", safe("[a](https://x.test)") == "[a](https://x.test)")
+check("safe: uppercase scheme is kept", safe("[a](HTTPS://X.TEST)") == "[a](HTTPS://X.TEST)")
+check("safe: mailto link is kept", safe("[mail](mailto:a@b.test)") == "[mail](mailto:a@b.test)")
+check("safe: link title is kept", safe('[a](https://x.test "t")') == '[a](https://x.test "t")')
+check("safe: file link becomes its label", safe("open [the file](file:///etc/passwd) now") == "open the file now")
+check("safe: javascript link becomes its label", safe("[click](javascript:alert(1))") == "click")
+check("safe: mixed-case javascript link becomes its label", safe("[click](JaVaScRiPt:alert(1))") == "click")
+check("safe: relative link becomes its label", safe("[doc](../docs/a.md)") == "doc")
+check("safe: custom scheme link becomes its label", safe("[app](linear://issue/ABC-1)") == "app")
+check("safe: leading whitespace in the target is ignored", safe("[x](  javascript:alert(1))") == "x")
+check("safe: angle-bracket target is checked", safe("[x](<javascript:alert(1)>)") == "x")
+check("safe: allowed angle-bracket target is kept", safe("[x](<https://x.test/a b>)") == "[x](<https://x.test/a b>)")
+check("safe: bare brackets are untouched", safe("[x] and [y][z] and [w]") == "[x] and [y][z] and [w]")
+check("safe: a link spanning lines is handled", safe("[two\nlines](javascript:x)") == "two\nlines")
+check("safe: two links in a line", safe("[a](javascript:x) [b](https://y.test)") == "a [b](https://y.test)")
+
+-- autolinks
+check("safe: http autolink is kept", safe("<https://x.test/a>") == "<https://x.test/a>")
+check("safe: mailto autolink is kept", safe("<mailto:a@b.test>") == "<mailto:a@b.test>")
+check(
+	"safe: javascript autolink becomes plain text",
+	safe("see <javascript:alert(1)> now") == "see javascript:alert(1) now"
+)
+check("safe: file autolink becomes plain text", safe("<file:///etc/passwd>") == "file:///etc/passwd")
+check("safe: custom scheme autolink becomes plain text", safe("<linear://issue/ABC-1>") == "linear://issue/ABC-1")
+check("safe: email autolink is untouched", safe("<a@b.test>") == "<a@b.test>")
+check("safe: a stray less-than is untouched", safe("1 < 2 and [a](https://x.test)") == "1 < 2 and [a](https://x.test)")
+
+-- reference definitions
+check("safe: allowed definition is kept", safe("[ref]: https://x.test/a\n") == "[ref]: https://x.test/a\n")
+check(
+	"safe: allowed definition with a title is kept",
+	safe('[ref]: https://x.test/a "Title"\nnext') == '[ref]: https://x.test/a "Title"\nnext'
+)
+check(
+	"safe: javascript definition is dropped",
+	safe("before\n\n[ref]: javascript:alert(1)\nafter") == "before\n\nafter"
+)
+check("safe: relative definition is dropped", safe("[ref]: ./a.md\n[b]: https://x.test\n") == "[b]: https://x.test\n")
+check("safe: angle-bracket definition is checked", safe("[ref]: <file:///x>\nz") == "z")
+check("safe: definition with the target on the next line is dropped", safe("[ref]:\n  javascript:x\nz") == "z")
+check("safe: a footnote is not a definition", safe("[^1]: see the note") == "[^1]: see the note")
+check("safe: prose after a bracket is not a definition", safe('[a]: b "c" d') == '[a]: b "c" d')
+
+-- code is left alone
+check(
+	"safe: backtick fence is untouched",
+	safe("```\n[a](javascript:x) ![i](file:x) <javascript:x>\n```\n[b](javascript:y)")
+		== "```\n[a](javascript:x) ![i](file:x) <javascript:x>\n```\nb"
+)
+check(
+	"safe: tilde fence is untouched",
+	safe("~~~lua\n[a](javascript:x)\n~~~\n[b](file:y)") == "~~~lua\n[a](javascript:x)\n~~~\nb"
+)
+check(
+	"safe: a longer fence needs a longer closer",
+	safe("````\n```\n[a](file:x)\n````") == "````\n```\n[a](file:x)\n````"
+)
+check("safe: an unclosed fence runs to the end", safe("```\n[a](file:x)") == "```\n[a](file:x)")
+check("safe: definitions in a fence are kept", safe("```\n[r]: javascript:x\n```") == "```\n[r]: javascript:x\n```")
+check("safe: inline code is untouched", safe("`[a](javascript:x)` [b](file:y)") == "`[a](javascript:x)` b")
+check(
+	"safe: double-backtick code is untouched",
+	safe("``[a](`x`)(javascript:x)`` ![i](f)") == "``[a](`x`)(javascript:x)`` 🖼 i"
+)
+check("safe: an unpaired backtick hides nothing", safe("`oops [a](javascript:x)") == "`oops a")
+check("safe: code in a link label is kept", safe("[`x]`](javascript:y)") == "`x]`")
+check("safe: an escaped bracket is not a link", safe("\\[a](javascript:x)") == "\\[a](javascript:x)")
+
+-- nesting and parentheses
+check("safe: nested brackets in a label", safe("[a [b] c](https://x.test)") == "[a [b] c](https://x.test)")
+check("safe: nested brackets in a dropped label", safe("[a [b] c](file:x)") == "a [b] c")
+check(
+	"safe: image inside a link keeps the link",
+	safe("[![i](https://x.test/i.png)](https://x.test)") == "[[🖼 i](https://x.test/i.png)](https://x.test)"
+)
+check(
+	"safe: image inside a dropped link keeps only the image",
+	safe("[![i](https://x.test/i.png)](javascript:x)") == "[🖼 i](https://x.test/i.png)"
+)
+check(
+	"safe: parentheses in a URL",
+	safe("[w](https://en.wikipedia.org/wiki/Luau_(language)) [b](https://x.test)")
+		== "[w](https://en.wikipedia.org/wiki/Luau_(language)) [b](https://x.test)"
+)
+check("safe: parentheses in a dropped URL", safe("[w](javascript:alert((1)))tail") == "wtail")
+
+-- size
+local big = string.rep("[a [b]](https://x.test/p_(q)) ![i](file:x) `c` <javascript:x>\n", 800)
+local started = os.clock()
+local bigOut = safe(big)
+check("safe: 50 KB converts quickly", #big > 45000 and os.clock() - started < 1 and #bigOut > 0)
+local hostile = string.rep("[a](x", 10000) .. string.rep("[", 10000) .. string.rep("`", 10000)
+started = os.clock()
+safe(hostile)
+check("safe: hostile nesting stays linear", os.clock() - started < 1)
+
 if failures > 0 then
 	error(`{failures} text test(s) failed`)
 end

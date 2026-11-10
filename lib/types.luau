@@ -270,6 +270,10 @@ export type BlockState = {
 	busy: boolean,
 	-- A background read is in flight: never gates input.
 	refreshing: boolean,
+	-- A foreground load started over an already-ready board; the issue list is not authoritative yet.
+	reloading: boolean,
+	-- Bumped when a select must remount to show the authoritative value (it is part of the select's key).
+	controlEpoch: number,
 	generation: number,
 	error: string?,
 	-- Transient success/info line (e.g. "Created ENG-12").

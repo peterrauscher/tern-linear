@@ -4,6 +4,7 @@
 -- of a focusable field is keyed and the ids below are constants the controller can focus.
 
 local model = require("./model")
+local text = require("./text")
 local types = require("./types")
 
 local ui = tern.ui
@@ -53,10 +54,19 @@ function detail.fieldName(id: string): string?
 		return "link"
 	end
 	local outer, inner = id:match(FORM_FIELD_PATTERN)
-	if outer and outer == inner then
+	if outer and inner and outer == (inner:gsub("%-e%d+$", "")) then
 		return "form:" .. outer
 	end
 	return nil
+end
+
+-- Selects carry the control epoch in their key: a bump remounts them to the authoritative value.
+-- The controller strips the `-e<N>` suffix before dispatching on the key.
+function detail.controlKey(key: string, epoch: number): string
+	if epoch == 0 then
+		return key
+	end
+	return `{key}-e{epoch}`
 end
 
 -- ─── Small helpers ──────────────────────────────────────────────────────────
@@ -103,8 +113,8 @@ local function isBlank(s: string): boolean
 	return s:match("^%s*$") ~= nil
 end
 
-local function muted(text: string): Node
-	return ui.text({ ui.span(text, "muted") })
+local function muted(label: string): Node
+	return ui.text({ ui.span(label, "muted") })
 end
 
 local function stateDot(stateType: string): Span
@@ -169,17 +179,18 @@ local function formOptions(field: FormField): { { value: string, label: string }
 	return options
 end
 
-local function formControl(field: FormField): Node
+local function formControl(state: BlockState, field: FormField): Node
 	local props: { [string]: any } = { key = "f-" .. field.name, role = "linear.field-" .. field.name }
 	if field.kind == "choice" then
+		props.key = detail.controlKey(props.key, state.controlEpoch)
 		props.value = field.value or ""
 		props.options = formOptions(field)
 		props.placeholder = field.placeholder
 		props.variant = "field"
 		return ui.node("select", props)
 	end
-	local text = fieldProps(field.field or { text = "", cursor = 0 }, field.placeholder)
-	for k, v in text do
+	local input = fieldProps(field.field or { text = "", cursor = 0 }, field.placeholder)
+	for k, v in input do
 		props[k] = v
 	end
 	props.variant = "field"
@@ -190,11 +201,11 @@ local function formControl(field: FormField): Node
 	return ui.node("input", props)
 end
 
-local function formField(field: FormField): Node
+local function formField(state: BlockState, field: FormField): Node
 	return with(
 		ui.col({
 			with(muted(field.label), { key = "label" }),
-			formControl(field),
+			formControl(state, field),
 		}),
 		{ key = "field-" .. field.name, role = "linear.form-field", gap = "xs" }
 	)
@@ -207,10 +218,10 @@ local function formError(form: Form): Node?
 	return with(ui.text({ ui.span(form.error, "error") }), { key = "error", role = "linear.form-error" })
 end
 
-local function formBody(form: Form, extra: { Node }): Node
+local function formBody(state: BlockState, form: Form, extra: { Node }): Node
 	local children: { Node } = {}
 	for _, field in form.fields do
-		table.insert(children, formField(field))
+		table.insert(children, formField(state, field))
 	end
 	local err = formError(form)
 	if err then
@@ -247,7 +258,7 @@ end
 -- ─── Create dialog ──────────────────────────────────────────────────────────
 
 local function dialog(state: BlockState, form: Form): Node
-	local body = with(formBody(form, {}), { key = "form", role = "linear.dialog-form" })
+	local body = with(formBody(state, form, {}), { key = "form", role = "linear.dialog-form" })
 	local foot = with(
 		ui.row({
 			cancelFormButton("cancel", state),
@@ -463,7 +474,7 @@ local function propertiesSection(state: BlockState, issue: Issue, team: Team?): 
 			"state",
 			"State",
 			ui.node("select", {
-				key = "state-select",
+				key = detail.controlKey("state-select", state.controlEpoch),
 				role = "linear.state-select",
 				value = issue.state.id,
 				options = stateOptions(team, issue.state),
@@ -475,7 +486,7 @@ local function propertiesSection(state: BlockState, issue: Issue, team: Team?): 
 			"assignee",
 			"Assignee",
 			ui.node("select", {
-				key = "assignee-select",
+				key = detail.controlKey("assignee-select", state.controlEpoch),
 				role = "linear.assignee-select",
 				value = if issue.assignee then issue.assignee.id else "",
 				options = assigneeOptions(team, issue.assignee),
@@ -487,7 +498,7 @@ local function propertiesSection(state: BlockState, issue: Issue, team: Team?): 
 			"priority",
 			"Priority",
 			ui.node("select", {
-				key = "priority-select",
+				key = detail.controlKey("priority-select", state.controlEpoch),
 				role = "linear.priority-select",
 				value = tostring(issue.priority),
 				options = priorityOptions(),
@@ -539,7 +550,7 @@ local function editForm(state: BlockState, form: Form): Node
 		}),
 		{ key = "buttons" }
 	)
-	return with(formBody(form, { buttons }), { key = "form", role = "linear.edit-form" })
+	return with(formBody(state, form, { buttons }), { key = "form", role = "linear.edit-form" })
 end
 
 local function descriptionSection(state: BlockState, issue: Issue): Node?
@@ -549,11 +560,11 @@ local function descriptionSection(state: BlockState, issue: Issue): Node?
 		end
 		return nil
 	end
-	local text = issue.description
-	if text == nil or isBlank(text) then
+	local body = issue.description
+	if body == nil or isBlank(body) then
 		return with(muted("No description"), { key = "description", role = "linear.description-empty" })
 	end
-	return with(ui.md(text), { key = "description", role = "linear.description" })
+	return with(ui.md(text.safeMarkdown(body)), { key = "description", role = "linear.description" })
 end
 
 local function issueLine(ref: IssueRef): Node
@@ -742,7 +753,7 @@ local function commentNode(comment: Comment, replies: { [string]: { Comment } },
 	})
 	local children: { Node } = {
 		with(head, { key = "head", role = "linear.comment-head" }),
-		with(ui.md(comment.body), { key = "body", role = "linear.comment-body" }),
+		with(ui.md(text.safeMarkdown(comment.body)), { key = "body", role = "linear.comment-body" }),
 	}
 	local own = replies[comment.id]
 	if own then

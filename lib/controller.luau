@@ -57,6 +57,8 @@ type Run = {
 	reloadQueued: boolean,
 	-- `e` pressed before the detail arrived: open the edit form once it does.
 	editAfterLoad: string?,
+	-- The viewer and team list loaded; until then polls retry the full load instead of the issues alone.
+	metaReady: boolean,
 }
 
 local runs: { [number]: Run } = {}
@@ -196,6 +198,8 @@ local function newState(cx: BlockCx, prefs: Prefs): BlockState
 		form = nil,
 		busy = false,
 		refreshing = false,
+		reloading = false,
+		controlEpoch = 0,
 		generation = 0,
 		error = nil,
 		notice = nil,
@@ -380,6 +384,8 @@ local function resetData(state: BlockState, run: Run)
 	state.generation += 1
 	state.busy = false
 	run.fgKind = nil
+	state.reloading = false
+	run.metaReady = false
 	run.reloadQueued = false
 	supersedeDetail(state, run)
 	run.editAfterLoad = nil
@@ -545,7 +551,7 @@ local function requestDetail(state: BlockState, run: Run, delayMs: number)
 		state.detail = nil
 		detail = nil
 	end
-	state.detailLoading = detail == nil
+	state.detailLoading = true
 	run.detailToken += 1
 	if delayMs <= 0 then
 		fetchDetail(state, run)
@@ -611,7 +617,6 @@ reloadIssues = function(state: BlockState, run: Run)
 		if live == nil then
 			return
 		end
-		state.refreshing = false
 		if state.generation == generation then
 			if page ~= nil then
 				commitIssues(state, live, page)
@@ -619,8 +624,8 @@ reloadIssues = function(state: BlockState, run: Run)
 			elseif err ~= nil then
 				fail(state, err, nil)
 			end
-			state.cx:render()
 		end
+		state.cx:render()
 		runQueuedReload(state, live)
 	end)
 end
@@ -658,7 +663,19 @@ end
 
 local function settle(state: BlockState, run: Run)
 	state.busy = false
+	state.reloading = false
 	run.fgKind = nil
+end
+
+-- Tern restores a select only when its `value` prop changes, so a pick that was not applied needs a
+-- remount (the epoch is part of every select's key) to show the authoritative value again.
+local function bumpControls(state: BlockState)
+	state.controlEpoch += 1
+end
+
+-- A mutation is in flight: form fields must not change under a form that success is about to close.
+local function formLocked(state: BlockState, run: Run): boolean
+	return state.busy and run.fgKind == "mutation"
 end
 
 -- viewer (when unknown) → teams → issues; `issuesOnly` skips straight to the issues.
@@ -675,6 +692,7 @@ local function loadAll(state: BlockState, issuesOnly: boolean)
 	if generation == nil then
 		return
 	end
+	state.reloading = state.phase == "ready"
 
 	local function failed(err: ApiError?)
 		local live = current(state, generation)
@@ -720,6 +738,7 @@ local function loadAll(state: BlockState, issuesOnly: boolean)
 				return
 			end
 			state.teams = teams
+			run.metaReady = true
 			if state.prefs.scope == "team" and teamById(state, state.prefs.teamId) == nil then
 				state.prefs.scope = "mine"
 				state.prefs.teamId = nil
@@ -752,7 +771,7 @@ end
 local function runMutation<T>(
 	state: BlockState,
 	inline: ((string) -> ())?,
-	start: (types.Config, types.Callback<T>) -> (),
+	start: (types.Config, types.Callback<T>, () -> boolean) -> (),
 	onSuccess: (T, Run) -> ()
 )
 	local run = runOf(state)
@@ -767,6 +786,10 @@ local function runMutation<T>(
 	if generation == nil then
 		return
 	end
+	-- `start` may chain requests; each hop checks this before it writes anything.
+	local function alive(): boolean
+		return current(state, generation) ~= nil
+	end
 	start(cfg, function(result: T?, err: ApiError?)
 		local live = current(state, generation)
 		if live == nil then
@@ -774,13 +797,14 @@ local function runMutation<T>(
 		end
 		settle(state, live)
 		if result == nil then
+			bumpControls(state)
 			fail(state, err or unknownError(), inline)
 		else
 			state.error = nil
 			onSuccess(result, live)
 		end
 		state.cx:render()
-	end)
+	end, alive)
 end
 
 -- ─── Polling ────────────────────────────────────────────────────────────────
@@ -809,17 +833,14 @@ local function checkForChanges(state: BlockState, run: Run)
 		if state.generation == generation then
 			if err ~= nil then
 				fail(state, err, nil)
-				state.cx:render()
 			else
-				if state.error ~= nil then
-					state.error = nil
-					state.cx:render()
-				end
+				state.error = nil
 				if newest ~= nil and (state.maxUpdatedAt == nil or newest > state.maxUpdatedAt) then
 					reloadIssues(state, live)
 				end
 			end
 		end
+		state.cx:render()
 		runQueuedReload(state, live)
 	end)
 end
@@ -845,6 +866,11 @@ local function tick(state: BlockState, run: Run)
 		end
 	end
 	if not pollAllowed(state) then
+		return
+	end
+	if not run.metaReady then
+		loadAll(state, false)
+		state.cx:render()
 		return
 	end
 	if tern.now() - run.lastFullAt >= FULL_RELOAD_MS then
@@ -992,8 +1018,18 @@ local function submitComment(state: BlockState)
 			end
 			local detail = state.detail
 			if detail ~= nil and detail.id == id then
-				local comments = detail.comments or {}
-				table.insert(comments, comment)
+				local comments: { types.Comment } = detail.comments or {}
+				local replaced = false
+				for index, existing in comments do
+					if existing.id == comment.id then
+						comments[index] = comment
+						replaced = true
+						break
+					end
+				end
+				if not replaced then
+					table.insert(comments, comment)
+				end
 				detail.comments = comments
 			end
 		end
@@ -1035,8 +1071,11 @@ local function submitLink(state: BlockState)
 	local mode = link.mode
 	runMutation(state, function(message: string)
 		link.error = message
-	end, function(cfg: types.Config, done: types.Callback<boolean>)
+	end, function(cfg: types.Config, done: types.Callback<boolean>, alive: () -> boolean)
 		linear.lookup(cfg, identifier, function(ref, err)
+			if not alive() then
+				return
+			end
 			if err ~= nil then
 				done(nil, err)
 				return
@@ -1087,19 +1126,25 @@ local function saveKey(state: BlockState)
 		state.setupError = "That doesn't look like a Linear API key."
 		return
 	end
+	local endpoint, rejected = credentials.endpoint()
+	if endpoint == nil then
+		state.setupError = rejected or "LINEAR_API_URL is not an allowed endpoint."
+		state.cx:render()
+		return
+	end
 	local generation = beginForeground(state, run, "mutation")
 	if generation == nil then
 		return
 	end
 	state.setupError = nil
-	local cfg: types.Config = { key = key, endpoint = credentials.endpoint() }
+	local cfg: types.Config = { key = key, endpoint = endpoint }
 	linear.viewer(cfg, function(viewer, err)
 		local live = current(state, generation)
 		if live == nil then
 			return
 		end
-		settle(state, live)
 		if viewer == nil then
+			settle(state, live)
 			if err ~= nil and err.kind == "auth" then
 				state.setupError = "Linear rejected the API key."
 			else
@@ -1108,20 +1153,27 @@ local function saveKey(state: BlockState)
 			state.cx:render()
 			return
 		end
-		local stored, reason = credentials.save(key)
-		if not stored then
-			state.setupError = reason or "Could not store the API key."
+		-- The foreground request stays alive until the key is on disk.
+		credentials.save(key, function(ok: boolean, reason: string?)
+			local saving = current(state, generation)
+			if saving == nil then
+				return
+			end
+			settle(state, saving)
+			if not ok then
+				state.setupError = reason or "Could not store the API key."
+				state.cx:render()
+				return
+			end
+			saving.cfg = cfg
+			state.keySource = "file"
+			state.viewer = viewer
+			text.set(state.setupKey, "")
+			state.phase = "loading"
+			setFocus(state, nil)
+			loadAll(state, false)
 			state.cx:render()
-			return
-		end
-		live.cfg = cfg
-		state.keySource = "file"
-		state.viewer = viewer
-		text.set(state.setupKey, "")
-		state.phase = "loading"
-		setFocus(state, nil)
-		loadAll(state, false)
-		state.cx:render()
+		end)
 	end)
 end
 
@@ -1129,7 +1181,12 @@ local function signOut(state: BlockState, run: Run)
 	if state.keySource ~= "file" then
 		return
 	end
-	credentials.clear()
+	local cleared, reason = credentials.clear()
+	if not cleared then
+		-- The key is still on disk: stay signed in and say why.
+		state.error = reason or "Could not remove the stored API key."
+		return
+	end
 	enterSetup(state, run, nil)
 end
 
@@ -1472,7 +1529,8 @@ end
 
 local function submitForm(state: BlockState)
 	local form = state.form
-	if form == nil then
+	local run = runOf(state)
+	if form == nil or run == nil or formLocked(state, run) then
 		return
 	end
 	if form.kind == "create" then
@@ -1525,7 +1583,14 @@ local function orderedIssues(state: BlockState): { Issue }
 	if state.prefs.layout == "table" then
 		return model.sortTable(visible, state.prefs.sort, state.prefs.sortAsc)
 	end
-	return visible
+	-- Board: the cards' order, column by column (mine scope re-sorts each column by priority).
+	local ordered: { Issue } = {}
+	for _, column in model.columns(visible, state.prefs, scopeTeam(state)) do
+		for _, issue in column.issues do
+			table.insert(ordered, issue)
+		end
+	end
+	return ordered
 end
 
 local function moveSelection(state: BlockState, run: Run, delta: number): boolean
@@ -1680,6 +1745,16 @@ local function copyText(state: BlockState, run: Run, value: string, label: strin
 	setNotice(state, run, "Copied " .. label)
 end
 
+-- Only Linear's own pages are opened from an issue's `url`.
+local function openIssueUrl(state: BlockState, run: Run, issue: Issue)
+	if string.match(issue.url, "^https://linear%.app/") ~= nil then
+		state.cx:open(issue.url)
+	else
+		setNotice(state, run, "Refusing to open a link outside linear.app.")
+		state.cx:render()
+	end
+end
+
 -- ─── Actions ────────────────────────────────────────────────────────────────
 
 type ActionHandler = (BlockState, Run, string?) -> ()
@@ -1729,6 +1804,9 @@ local ACTIONS: { [string]: ActionHandler } = {
 	["clear-filters"] = function(state, _run, _value)
 		clearFilters(state)
 	end,
+	["focus-team"] = function(state, run, _value)
+		nextTeam(state, run)
+	end,
 	["select"] = function(state, run, value)
 		if value ~= nil then
 			selectIssue(state, run, value, true, 0)
@@ -1737,9 +1815,9 @@ local ACTIONS: { [string]: ActionHandler } = {
 	["close-detail"] = function(state, run, _value)
 		closeDrawer(state, run)
 	end,
-	["open-url"] = function(state, _run, value)
+	["open-url"] = function(state, run, value)
 		withIssue(state, value, function(issue)
-			state.cx:open(issue.url)
+			openIssueUrl(state, run, issue)
 		end)
 	end,
 	["copy-id"] = function(state, run, value)
@@ -1911,6 +1989,9 @@ local function handleFormKey(state: BlockState, run: Run, k: Key): boolean
 	local form = state.form
 	if form == nil then
 		setFocus(state, nil)
+		return true
+	end
+	if formLocked(state, run) then
 		return true
 	end
 	local field = form.fields[form.focus]
@@ -2092,8 +2173,8 @@ local KEYS: { [string]: KeyHandler } = {
 	["]"] = selectedAction(function(state, run, issue)
 		moveAdjacent(state, run, issue, 1)
 	end),
-	["o"] = selectedAction(function(state, _run, issue)
-		state.cx:open(issue.url)
+	["o"] = selectedAction(function(state, run, issue)
+		openIssueUrl(state, run, issue)
 	end),
 	["y"] = selectedAction(function(state, run, issue)
 		copyText(state, run, issue.identifier, issue.identifier)
@@ -2181,9 +2262,12 @@ local function onFocus(state: BlockState, ev: UiEvent)
 	setFocus(state, focus)
 end
 
-local function onEdit(state: BlockState, ev: UiEvent)
+local function onEdit(state: BlockState, run: Run, ev: UiEvent)
 	local focus, field, index = fieldOfEvent(state, ev)
 	if focus == nil or field == nil then
+		return
+	end
+	if focus == "form" and formLocked(state, run) then
 		return
 	end
 	if not text.applyEdit(field, ev) then
@@ -2197,6 +2281,19 @@ local function onEdit(state: BlockState, ev: UiEvent)
 	if focus == "setup" then
 		state.setupError = nil
 	end
+end
+
+-- Selects whose pick may go unapplied (refused, rejected or failed); they remount to the real value.
+local REMOUNTING_SELECTS: { [string]: boolean } = {
+	["team-select"] = true,
+	["state-select"] = true,
+	["assignee-select"] = true,
+	["priority-select"] = true,
+}
+
+-- Select keys carry the control epoch (`state-select-e2`); dispatch is on the key without it.
+local function baseKey(key: string): string
+	return (string.gsub(key, "%-e%d+$", ""))
 end
 
 local function onAction(state: BlockState, run: Run, ev: UiEvent)
@@ -2229,19 +2326,28 @@ local function onChange(state: BlockState, run: Run, ev: UiEvent)
 	if type(id) ~= "string" or value == nil or state.phase ~= "ready" then
 		return
 	end
-	local key = string.match(id, "([^%.]+)$")
-	if key == nil then
+	local last = string.match(id, "([^%.]+)$")
+	if last == nil then
 		return
 	end
+	local key = baseKey(last)
 	local formName = string.match(key, "^f%-(.+)$")
 	if formName ~= nil then
-		focusFormChoice(state, formName, value)
+		if formLocked(state, run) then
+			bumpControls(state)
+		else
+			focusFormChoice(state, formName, value)
+		end
 		return
 	end
 	local handler = SELECTS[key]
 	if handler ~= nil then
 		blurTextFocus(state)
+		local before = state.generation
 		handler(state, run, value)
+		if state.generation == before and REMOUNTING_SELECTS[key] then
+			bumpControls(state)
+		end
 	end
 end
 
@@ -2264,7 +2370,7 @@ local function handleEvent(state: BlockState, ev: UiEvent, _cx: BlockCx)
 	if kind == "focus" then
 		onFocus(state, ev)
 	elseif kind == "edit" then
-		onEdit(state, ev)
+		onEdit(state, run, ev)
 	elseif kind == "action" then
 		onAction(state, run, ev)
 	elseif kind == "change" then
@@ -2279,9 +2385,9 @@ end
 -- ─── Block definition ───────────────────────────────────────────────────────
 
 local function startRun(state: BlockState, run: Run)
-	local cfg = credentials.resolve()
+	local cfg, rejected = credentials.resolve()
 	if cfg == nil then
-		enterSetup(state, run, nil)
+		enterSetup(state, run, rejected)
 	else
 		run.cfg = cfg
 		state.keySource = credentials.source()
@@ -2308,6 +2414,7 @@ local function register(state: BlockState): Run
 		focusQueued = false,
 		reloadQueued = false,
 		editAfterLoad = nil,
+		metaReady = false,
 	}
 	runs[state.cx.pane] = run
 	return run

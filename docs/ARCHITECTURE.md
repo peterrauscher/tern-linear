@@ -24,10 +24,10 @@ flowchart LR
 | `lib/linear.luau` | HTTP, auth header, error classification, rate headers, paging, normalization into `types.*` | touch block state or `cx` |
 | `lib/credentials.luau` | API key resolution, storage, endpoint | log or display the key |
 | `lib/model.luau` | pure board logic: grouping, filtering, sorting, server filter, blocked, default states, dates, edit diffs | call `tern.*` (pure Luau; unit-tested with the `luau` CLI) |
-| `lib/text.luau` | UTF-16 controlled text fields | call `tern.*` |
+| `lib/text.luau` | UTF-16 controlled text fields; `safeMarkdown` for descriptions and comments | call `tern.*` |
 | `lib/controller.luau` | `BlockDef`, state, keys, events, actions, request discipline, polling, forms | build nodes |
 | `lib/view.luau` | `main` region, top bar, filters, board, table, setup screen, empty/error states; composes the `layer` from `view_detail` | mutate state |
-| `lib/view_detail.luau` | `layer` region: detail drawer, inline edit form, comments, relations, create dialog | mutate state |
+| `lib/view_detail.luau` | `layer` region: detail drawer, inline edit form, comments, relations, create dialog; both overlays use the single key `layer.panel` so field ids stay stable | mutate state |
 | `styles/linear.css` | styles for `view.luau` | style `.sf-layer` or unscoped selectors |
 | `styles/detail.css` | styles for `view_detail.luau` | style `main` |
 
@@ -50,15 +50,15 @@ Each value is exactly one named operation in a `[[ ... ]]` long string, the oper
 ### `lib/credentials.luau`
 
 ```luau
-credentials.resolve(): types.Config?        -- env LINEAR_API_KEY, else the key file; nil when neither
+credentials.resolve(): (types.Config?, string?) -- env LINEAR_API_KEY, else the key file; nil + reason when a key exists but LINEAR_API_URL is rejected; nil when neither
 credentials.source(): ("env" | "file")?
-credentials.save(key: string): (boolean, string?)   -- writes the key file, then chmod 600 (POSIX)
-credentials.clear(): ()                     -- deletes the key file; env keys are untouched
-credentials.endpoint(): string              -- env LINEAR_API_URL, else "https://api.linear.app/graphql"
-credentials.looksLikeKey(s: string): boolean -- trimmed, starts with "lin_api_" or "lin_oauth_", no whitespace
+credentials.save(key: string, cb: (ok: boolean, err: string?) -> ()) -- POSIX: owner-only write via /bin/sh (umask 077, dir 700, file 600); Windows: tern.fs.write
+credentials.clear(): (boolean, string?)       -- deletes the key file; false if it is still there; env keys are untouched
+credentials.endpoint(): (string?, string?)    -- https://api.linear.app/graphql, or http(s) on 127.0.0.1 / localhost / [::1]; nil + reason when LINEAR_API_URL is anything else
+credentials.looksLikeKey(s: string): boolean  -- trimmed, starts with "lin_api_" or "lin_oauth_", no whitespace
 ```
 
-Key file: `tern.plugin.data .. "/credentials.json"`, JSON `{ "apiKey": "…" }`. Personal keys go in `Authorization: <key>` (no `Bearer`); keys starting with `lin_oauth_` get `Bearer `. `tern.secrets` is window-only, so the host half cannot use the keychain; the README says so plainly. `LINEAR_API_URL` exists for the mock server in tests; it is honoured only when set in the environment of the process running the host half.
+Key file: `tern.plugin.data .. "/credentials.json"`, JSON `{ "apiKey": "…" }`; reads are capped at 16 KiB and a missing, unreadable or corrupt file counts as "no key". On POSIX, `save` writes through `/bin/sh` with `umask 077` (temp file, then `mv`) and `chmod 700` on the data directory, so the key is never created world-readable and never appears in argv. Windows uses `tern.fs.write`. `clear` removes the file and checks it is gone. That shell is the only process the plugin starts. Personal keys go in `Authorization: <key>` (no `Bearer`); keys starting with `lin_oauth_` get `Bearer `. `tern.secrets` is window-only, so the host half cannot use the keychain. `LINEAR_API_URL` is read only from the daemon environment and is accepted only for Linear's endpoint or a loopback URL (the mock server); any other value withholds the key and returns a fixed error that does not echo the URL. Descriptions and comments pass through `text.safeMarkdown` before `ui.md`: images become links, and link targets other than `http`, `https` and `mailto` are dropped.
 
 ### `lib/linear.luau`
 
@@ -167,7 +167,7 @@ Field names: `"search"`, `"setup"`, `"comment"`, `"link"`, `"form:<FormField.nam
 ### `lib/view_detail.luau`
 
 ```luau
-detail.layer(state: BlockState, cx: BlockCx): Node?      -- layer region root (a container) or nil
+detail.layer(state: BlockState, cx: BlockCx): Node?      -- layer region root (a col holding one overlay keyed "panel") or nil
 detail.fieldId(name: string): string?
 detail.fieldName(id: string): string?
 ```
@@ -187,7 +187,7 @@ Views attach `actions = { click = "<act>=<value>" }`. Tern splits at the first `
 | `clear-filters` | priority/assignee/label filters and query cleared |
 | `select=<issueId>` | select and open the drawer |
 | `close-detail` | close the drawer |
-| `open-url=<issueId>` | `cx:open(issue.url)` |
+| `open-url=<issueId>` | `cx:open` only when `issue.url` matches `^https://linear%.app/`; otherwise a notice |
 | `copy-id=<issueId>` / `copy-branch=<issueId>` | `cx:copy` identifier / branch name |
 | `set-state=<stateId>` | update the selected issue's state |
 | `assign-me` / `unassign` | update assignee |
@@ -229,8 +229,8 @@ The controller routes by `state.focus`. Global keys (no field focused, no ctrl/m
 | `t` | next team (cycles teams) |
 | `j` / `down`, `k` / `up` | select next / previous visible issue (opens nothing) |
 | `h` / `left`, `l` / `right` | board: first issue of previous / next column |
-| `enter` | open the drawer for the selection |
-| `escape` | close dialog, else drawer, else clear selection |
+| `enter` | open the drawer for the selection (nothing when the drawer is already open) |
+| `escape` | cancel the open form, else the link input, else close the drawer, else clear the selection |
 | `n` | create dialog |
 | `e` | edit selected |
 | `c` | focus comment (drawer open) |
@@ -241,7 +241,7 @@ The controller routes by `state.focus`. Global keys (no field focused, no ctrl/m
 | `y` | copy selected identifier |
 | `r` | refresh |
 
-In fields: `escape` leaves the field (search keeps its text); `enter` submits single-line fields; `ctrl+enter` / `cmd+enter` submits multiline ones; `tab` / `shift+tab` move between form fields; `up`/`down` (or `left`/`right`) on a focused choice field step its options.
+In fields: `escape` leaves the search and comment fields (search keeps its text) and cancels forms and the link input; `tab` also leaves the comment field; `enter` submits single-line fields (form, link input; on the setup screen it connects); `ctrl+enter` / `cmd+enter` submits multiline fields and the comment box; `tab` / `shift+tab` move between form fields; `up`/`down` (or `left`/`right`) on a focused choice field step its options. Modified keys (ctrl, alt, cmd) are never handled outside fields.
 
 ## Visible text and roles
 
@@ -264,7 +264,8 @@ E2E tests, CSS and screenshots rely on these. Every node listed carries `role` (
 | `linear.refresh` | button | `Refresh` (or `Synced 2m ago`) |
 | `linear.error` | error banner | the error text |
 | `linear.notice` | notice line | the notice text |
-| `linear.empty` | empty state | `No issues in this view` (or `No matching issues` when filtered) |
+| `linear.empty` | empty state | `No issues in this view` (or `No matching issues` when filtered). Unfiltered My issues / Active also shows `Nothing assigned to you is active.` plus **All** and **Choose team** (`focus-team`, which calls `nextTeam`). Filtered empty adds **Clear filters**. |
+| `linear.reloading` | row shown in place of the board while a foreground reload is in flight | `Loading issues…` |
 | `linear.board` | board row | |
 | `linear.column` | one column | state name and count |
 | `linear.card` | one issue card | identifier, title |
@@ -286,7 +287,17 @@ E2E tests, CSS and screenshots rely on these. Every node listed carries `role` (
 | `linear.edit-form` | inline edit form | |
 | `linear.form-submit` / `linear.form-cancel` | buttons | `Create issue` or `Save` / `Cancel` |
 | `linear.form-error` | form error | the error text |
-| `linear.sign-out` | button | `Sign out` |
+| `linear.sign-out` | button, shown only when the key comes from the key file | `Sign out` |
+| `linear.filters`, `linear.filter-priority`, `linear.filter-assignee`, `linear.filter-label`, `linear.clear-filters`, `linear.count` | filter row | `Any priority`, `Any assignee`, `Any label`, `Clear filters`, `N issues` (`Showing first N` when truncated) |
+| `linear.sort`, `linear.sort-<key>` | table sort bar | `Sort`, then one button per sortable column |
+| `linear.column-head`, `linear.column-empty`, `linear.state-dot` | column parts | state name and count; `No issues` |
+| `linear.header`, `linear.title`, `linear.meta`, `linear.actions`, `linear.props`, `linear.prop`, `linear.labels`, `linear.parent`, `linear.unassign` | drawer header, button row and property rows | title, `Unassign`, property labels |
+| `linear.description-empty`, `linear.description-loading` | description placeholders | `No description`, a loading line |
+| `linear.children`, `linear.child` | sub-issues section and rows | `Sub-issues` |
+| `linear.relation-group`, `linear.relation-group-title`, `linear.relation`, `linear.relation-open` | relation groups and rows | `Blocked by`, `Blocks`, `Related` |
+| `linear.link`, `linear.link-mode`, `linear.link-submit`, `linear.link-cancel`, `linear.link-error` | relation link input | mode label, buttons, error |
+| `linear.comment-head`, `linear.comment-body`, `linear.replies`, `linear.composer` | comment parts | author and time; body; replies; composer |
+| `linear.form-field`, `linear.field-<name>`, `linear.dialog-form` | form rows and controls | field label and control |
 
 The `blocked` card state shows the text `Blocked` on the card. Priority shows as `Urgent`, `High`, `Medium`, `Low` (nothing for 0).
 
