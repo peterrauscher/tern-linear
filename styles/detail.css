@@ -76,6 +76,7 @@
 
 .sf-layer[data-surface='plugin.linear.board'] [data-role='linear.relations'],
 .sf-layer[data-surface='plugin.linear.board'] [data-role='linear.children'],
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestones'],
 .sf-layer[data-surface='plugin.linear.board'] [data-role='linear.comments'] {
 	padding-top: 14px;
 	border-top: 1px solid var(--l2);
@@ -153,6 +154,130 @@
 
 .sf-layer[data-surface='plugin.linear.board'] [data-role='linear.composer'] {
 	margin-top: 4px;
+}
+
+/* ── Milestones: a name row over its markdown description ───────────────── */
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestones'] {
+	gap: 10px;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone'] {
+	padding: 8px 10px;
+	border-radius: var(--r-ctl);
+	box-shadow: inset 0 0 0 1px var(--l2);
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-head'] {
+	gap: 8px;
+}
+
+/* The date and the percentage keep their width; the name takes what is left and wraps. */
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-head'] > [data-mark] {
+	flex: none;
+	font-size: 12px;
+	white-space: nowrap;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-description'] {
+	margin-top: 4px;
+	font-size: 12px;
+	line-height: 1.5;
+	overflow-wrap: anywhere;
+}
+
+/* The head toggles its issue table: chevron and count keep their width, the head row takes what is left. */
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-toggle'] {
+	gap: 8px;
+	margin: -4px -6px;
+	padding: 4px 6px;
+	border-radius: var(--r-chip);
+	cursor: pointer;
+	min-width: 0;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-toggle']:hover {
+	background: var(--l1);
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-toggle'] > [data-mark] {
+	flex: none;
+	font-size: 12px;
+	white-space: nowrap;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-toggle'] > [data-mark='chevron'] {
+	width: 12px;
+	color: var(--t3);
+}
+
+/* ── Milestone issues: a compact table of clickable rows ────────────────── */
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issues'] {
+	margin-top: 6px;
+	padding-top: 6px;
+	border-top: 1px solid var(--l2);
+	gap: 2px;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issues-head'],
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issue'] {
+	gap: 8px;
+	padding: 3px 6px;
+	margin: 0 -6px;
+	border-radius: var(--r-chip);
+	min-width: 0;
+	font-size: 12px;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issues-head'] {
+	color: var(--t3);
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issue'] {
+	cursor: pointer;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issue']:hover {
+	background: var(--l1);
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issues-head'] > [data-mark],
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issue'] > [data-mark] {
+	flex: none;
+	white-space: nowrap;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issues-head'] > [data-mark='id'],
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issue'] > [data-mark='id'] {
+	width: 64px;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issues-head'] > [data-mark='status'],
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issue'] > [data-mark='status'] {
+	width: 96px;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issues-head'] > [data-mark='assignee'],
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issue'] > [data-mark='assignee'] {
+	width: 84px;
+}
+
+/* The title takes the remaining width and ends in an ellipsis. */
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issues-head'] > [data-mark='title'],
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issue'] > [data-mark='title'] {
+	flex: 1 1 0;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issue'] > [data-mark='status'],
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issue'] > [data-mark='assignee'],
+.sf-layer[data-surface='plugin.linear.board'] [data-role='linear.milestone-issue'] > [data-mark='id'] {
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 /* ── Forms ──────────────────────────────────────────────────────────────── */

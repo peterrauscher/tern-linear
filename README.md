@@ -10,6 +10,7 @@ Your Linear issues as a native board in a [Tern](https://stencil.so/tern) pane: 
 
 - Board (one column per workflow state) or sortable table, switched with one key.
 - **My issues** (assigned to you, across all teams) or any **team** scope.
+- **Projects** scope: project cards in status columns (Active, Backlog, All), filtered by search, team and lead. Selecting a project opens a read-only drawer with its properties, Markdown content and milestones.
 - **Active**, **Backlog** and **All** views. Closed issues appear in All only when closed in the last 14 days.
 - Search, plus priority, assignee and label filters.
 - Detail drawer with the Markdown description, properties, sub-issues, relations and threaded comments.
@@ -65,6 +66,7 @@ Keys work when no text field has focus. Keys with Ctrl, Alt or Cmd are left to T
 | `v` | Toggle board and table |
 | `m` | My issues |
 | `t` | Next team (cycles through your teams) |
+| `p` | Projects |
 | `j` / `Down`, `k` / `Up` | Select next / previous issue |
 | `h` / `Left`, `l` / `Right` | Board: first issue of the previous / next column |
 | `Enter` | Open the selected issue in the drawer |

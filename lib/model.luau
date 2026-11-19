@@ -6,6 +6,7 @@ local types = require("./types")
 
 type Issue = types.Issue
 type IssueRef = types.IssueRef
+type Project = types.Project
 type Prefs = types.Prefs
 type Team = types.Team
 type WorkflowState = types.WorkflowState
@@ -18,6 +19,13 @@ export type Column = {
 	stateId: string?,
 	color: string?,
 	issues: { Issue },
+}
+
+export type ProjectColumn = {
+	id: string,
+	title: string,
+	statusType: string,
+	projects: { types.Project },
 }
 
 local model = {}
@@ -63,6 +71,46 @@ end
 
 function model.isClosedType(t: string): boolean
 	return table.find(CLOSED_TYPES, t) ~= nil
+end
+
+local PROJECT_STATUS_TYPES: { string } =
+	table.freeze({ "backlog", "planned", "started", "paused", "completed", "canceled" })
+model.PROJECT_STATUS_TYPES = PROJECT_STATUS_TYPES
+
+model.PROJECT_TYPE_TITLES = {
+	backlog = "Backlog",
+	planned = "Planned",
+	started = "In Progress",
+	paused = "Paused",
+	completed = "Completed",
+	canceled = "Canceled",
+} :: { [string]: string }
+
+model.HEALTH_LABELS = {
+	onTrack = "On track",
+	atRisk = "At risk",
+	offTrack = "Off track",
+} :: { [string]: string }
+
+local PROJECT_VIEW_TYPES: { [string]: { string } } = {
+	active = table.freeze({ "planned", "started", "paused" }),
+	backlog = table.freeze({ "backlog" }),
+	all = PROJECT_STATUS_TYPES,
+}
+
+local PROJECT_CLOSED_TYPES: { string } = { "completed", "canceled" }
+
+function model.projectTypeRank(t: string): number
+	local rank = table.find(PROJECT_STATUS_TYPES, t)
+	return rank or #PROJECT_STATUS_TYPES + 1
+end
+
+function model.isClosedProjectType(t: string): boolean
+	return table.find(PROJECT_CLOSED_TYPES, t) ~= nil
+end
+
+function model.projectViewTypes(view: string): { string }
+	return PROJECT_VIEW_TYPES[view] or PROJECT_VIEW_TYPES.active
 end
 
 function model.viewTypes(view: string): { string }
@@ -139,6 +187,24 @@ function model.serverFilter(prefs: Prefs): any
 	end
 	table.insert(parts, viewFilter(prefs.view))
 	return { ["and"] = parts }
+end
+
+local function projectStatusFilter(comparator: string, statusTypes: { string }): any
+	return { status = { type = { [comparator] = statusTypes } } }
+end
+
+-- Linear ProjectFilter as plain tables, mirroring the issue board's views.
+function model.projectServerFilter(prefs: Prefs): any
+	if prefs.view == "all" then
+		return {
+			["or"] = {
+				projectStatusFilter("nin", PROJECT_CLOSED_TYPES),
+				{ completedAt = { gt = "-P14D" } },
+				{ canceledAt = { gt = "-P14D" } },
+			},
+		}
+	end
+	return projectStatusFilter("in", model.projectViewTypes(prefs.view))
 end
 
 -- ─── Ordering ───────────────────────────────────────────────────────────────
@@ -447,6 +513,108 @@ function model.columns(visible: { Issue }, prefs: Prefs, team: Team?): { Column 
 		return teamColumns(visible, team, stateTypes)
 	end
 	return mineColumns(visible, stateTypes)
+end
+
+-- ─── Projects ───────────────────────────────────────────────────────────────
+
+local function matchesProjectQuery(project: Project, needle: string): boolean
+	local parts: { string } = { project.name, project.description }
+	local lead = project.lead
+	if lead ~= nil then
+		table.insert(parts, lead.name)
+		table.insert(parts, lead.displayName)
+	end
+	for _, team in project.teams do
+		table.insert(parts, team.key)
+		table.insert(parts, team.name)
+	end
+	return string.find(string.lower(table.concat(parts, "\n")), needle, 1, true) ~= nil
+end
+
+local function hasProjectTeam(project: Project, teamId: string): boolean
+	for _, team in project.teams do
+		if team.id == teamId then
+			return true
+		end
+	end
+	return false
+end
+
+local function matchesProjectLead(project: Project, wanted: string, viewerId: string?): boolean
+	local lead = project.lead
+	if wanted == "none" then
+		return lead == nil
+	end
+	local id = if wanted == "me" then viewerId else wanted
+	return lead ~= nil and id ~= nil and lead.id == id
+end
+
+local function compareProject(a: Project, b: Project): number
+	local byType = compare(model.projectTypeRank(a.status.type), model.projectTypeRank(b.status.type))
+	if byType ~= 0 then
+		return byType
+	end
+	local byPriority = compare(priorityRank(a.priority), priorityRank(b.priority))
+	if byPriority ~= 0 then
+		return byPriority
+	end
+	local bySortOrder = compare(a.sortOrder, b.sortOrder)
+	if bySortOrder ~= 0 then
+		return bySortOrder
+	end
+	local byName = compareText(a.name, b.name)
+	if byName ~= 0 then
+		return byName
+	end
+	return if a.id < b.id then -1 elseif a.id > b.id then 1 else 0
+end
+
+function model.visibleProjects(projects: { Project }, prefs: Prefs, query: string, viewerId: string?): { Project }
+	local needle = string.lower(string.match(query, "^%s*(.-)%s*$") :: string)
+	local teamId = prefs.projectTeamId
+	local lead = prefs.projectLead
+	local seen: { [string]: boolean } = {}
+	local out: { Project } = {}
+	for _, project in projects do
+		local keep = not seen[project.id]
+			and (needle == "" or matchesProjectQuery(project, needle))
+			and (teamId == nil or hasProjectTeam(project, teamId))
+			and (lead == nil or matchesProjectLead(project, lead, viewerId))
+		if keep then
+			table.insert(out, project)
+		end
+		seen[project.id] = true
+	end
+	table.sort(out, function(a: Project, b: Project): boolean
+		return compareProject(a, b) < 0
+	end)
+	return out
+end
+
+function model.projectColumns(visible: { Project }, view: string): { ProjectColumn }
+	local columns: { ProjectColumn } = {}
+	local byType: { [string]: ProjectColumn } = {}
+	for _, statusType in model.projectViewTypes(view) do
+		local column: ProjectColumn = {
+			id = statusType,
+			title = model.PROJECT_TYPE_TITLES[statusType] or statusType,
+			statusType = statusType,
+			projects = {},
+		}
+		table.insert(columns, column)
+		byType[statusType] = column
+	end
+	for _, project in visible do
+		local column = byType[project.status.type]
+		if column ~= nil then
+			table.insert(column.projects, project)
+		end
+	end
+	return columns
+end
+
+function model.progressPercent(progress: number): number
+	return math.clamp(math.floor(progress * 100 + 0.5), 0, 100)
 end
 
 -- ─── Table sorting ──────────────────────────────────────────────────────────

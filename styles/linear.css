@@ -82,7 +82,8 @@
 /* ── Board ─────────────────────────────────────────────────────────────── */
 
 /* Columns keep their minimum width; a narrow pane scrolls the board sideways. */
-[data-role='linear.board'] {
+[data-role='linear.board'],
+[data-role='linear.projects-board'] {
 	overflow-x: auto;
 	overflow-y: hidden;
 	padding-bottom: 8px;
@@ -131,7 +132,27 @@
 	opacity: 0.6;
 }
 
-[data-role='linear.card'] {
+/* Project statuses: planned is a ring with a faint fill, paused a ring around two bars. */
+[data-role='linear.state-dot'][data-mark='planned'] {
+	background: color-mix(in srgb, var(--tc, var(--t3)) 16%, transparent);
+}
+
+[data-role='linear.state-dot'][data-mark='paused'] {
+	background: linear-gradient(
+		90deg,
+		transparent 30%,
+		var(--tc, var(--t3)) 30%,
+		var(--tc, var(--t3)) 45%,
+		transparent 45%,
+		transparent 55%,
+		var(--tc, var(--t3)) 55%,
+		var(--tc, var(--t3)) 70%,
+		transparent 70%
+	);
+}
+
+[data-role='linear.card'],
+[data-role='linear.project-card'] {
 	padding: 8px 10px 9px;
 	border-radius: var(--r-ctl);
 	background: var(--card);
@@ -139,12 +160,14 @@
 	transition: background 0.12s var(--ease), box-shadow 0.12s var(--ease);
 }
 
-[data-role='linear.card']:hover {
+[data-role='linear.card']:hover,
+[data-role='linear.project-card']:hover {
 	background: var(--raise);
 	box-shadow: inset 0 0 0 1px var(--l3);
 }
 
-[data-role='linear.card'][data-mark='selected'] {
+[data-role='linear.card'][data-mark='selected'],
+[data-role='linear.project-card'][data-mark='selected'] {
 	box-shadow: inset 0 0 0 1.5px var(--accent);
 }
 
@@ -168,4 +191,35 @@
 	text-overflow: ellipsis;
 	white-space: nowrap;
 	font-size: 12px;
+}
+
+/* ── Project cards ─────────────────────────────────────────────────────── */
+
+/* The summary keeps the 18px line the card title uses, so its two-line limit never shows a sliver of a third line. */
+[data-role='linear.project-summary'] {
+	font-size: 12px;
+	line-height: 18px;
+}
+
+/* Tern's progress bar: it takes the row's spare width and carries the percentage; the target date follows it. */
+.sf-progress[data-role='linear.project-progress'] {
+	flex: 1 1 auto;
+	gap: 8px;
+	font-size: 11px;
+}
+
+.sf-progress[data-role='linear.project-progress'] .track {
+	min-width: 24px;
+}
+
+[data-role='linear.project-card']:hover .sf-progress[data-role='linear.project-progress'] .track {
+	background: var(--l3);
+}
+
+/* The date stays on one line and sits at the row's end, also when it wraps below the bar. */
+[data-role='linear.project-card'] [data-mark='target'] {
+	flex: none;
+	margin-left: auto;
+	font-size: 12px;
+	white-space: nowrap;
 }

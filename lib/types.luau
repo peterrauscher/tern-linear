@@ -120,6 +120,88 @@ export type Viewer = {
 	organization: { id: string, name: string, urlKey: string },
 }
 
+export type ProjectStatus = {
+	id: string,
+	name: string,
+	-- "backlog" | "planned" | "started" | "paused" | "completed" | "canceled"
+	type: string,
+	color: string,
+	position: number,
+}
+
+export type TeamRef = {
+	id: string,
+	key: string,
+	name: string,
+}
+
+export type ProjectMilestone = {
+	id: string,
+	name: string,
+	description: string?,
+	-- "unstarted" | "next" | "overdue" | "done"
+	status: string,
+	-- 0..1 fraction from Linear
+	progress: number,
+	sortOrder: number,
+	-- "YYYY-MM-DD"
+	targetDate: string?,
+	createdAt: string,
+	updatedAt: string,
+}
+
+-- One row of a milestone's issue table in the project drawer.
+export type ProjectIssue = {
+	id: string,
+	identifier: string,
+	title: string,
+	stateName: string,
+	stateType: string,
+	sortOrder: number,
+	teamId: string,
+	assignee: User?,
+	-- nil when the issue has no milestone.
+	milestoneId: string?,
+}
+
+export type Project = {
+	id: string,
+	slugId: string,
+	name: string,
+	-- Short plain-text summary ("" when unset).
+	description: string,
+	-- Long-form markdown body; only present after a detail fetch (`detailed == true`).
+	content: string?,
+	-- 0 none, 1 urgent, 2 high, 3 medium, 4 low
+	priority: number,
+	priorityLabel: string,
+	-- 0..1 fraction
+	progress: number,
+	-- "onTrack" | "atRisk" | "offTrack" | nil
+	health: string?,
+	url: string,
+	sortOrder: number,
+	-- "YYYY-MM-DD"
+	startDate: string?,
+	targetDate: string?,
+	createdAt: string,
+	updatedAt: string,
+	completedAt: string?,
+	canceledAt: string?,
+	archivedAt: string?,
+	status: ProjectStatus,
+	creator: User?,
+	lead: User?,
+	teams: { TeamRef },
+	-- Sorted by (sortOrder, targetDate, createdAt, id); only present after a detail fetch.
+	milestones: { ProjectMilestone }?,
+	-- The project's issues, sorted by (state type rank, sortOrder); only present after a detail fetch.
+	issues: { ProjectIssue }?,
+	-- True when MAX_PROJECT_ISSUES was reached and more issues exist.
+	issuesTruncated: boolean,
+	detailed: boolean,
+}
+
 -- ─── Data layer ─────────────────────────────────────────────────────────────
 
 export type Config = {
@@ -142,6 +224,12 @@ export type Callback<T> = (result: T?, err: ApiError?) -> ()
 export type IssuePage = {
 	issues: { Issue },
 	-- True when MAX_ISSUES was reached and more matched on the server.
+	truncated: boolean,
+}
+
+export type ProjectPage = {
+	projects: { Project },
+	-- True when MAX_PROJECTS was reached and more matched on the server.
 	truncated: boolean,
 }
 
@@ -176,8 +264,9 @@ export type Field = {
 -- ─── Board preferences (persisted by `save`) ────────────────────────────────
 
 export type Prefs = {
-	-- "mine": issues assigned to the viewer across teams; "team": every issue of `teamId`.
-	scope: "mine" | "team",
+	-- "mine": issues assigned to the viewer across teams; "team": every issue of `teamId`;
+	-- "projects": project cards grouped by project status.
+	scope: "mine" | "team" | "projects",
 	teamId: string?,
 	-- "active": triage/unstarted/started; "backlog": backlog; "all": everything,
 	-- closed ones only when closed in the last 14 days.
@@ -191,6 +280,10 @@ export type Prefs = {
 	-- "me" | "none" | <user id>
 	assignee: string?,
 	labelId: string?,
+	-- Projects scope client-side filters (session-only, never persisted); nil means "any".
+	projectTeamId: string?,
+	-- "me" | "none" | <user id>
+	projectLead: string?,
 }
 
 -- ─── Forms ──────────────────────────────────────────────────────────────────
@@ -245,6 +338,8 @@ export type BlockState = {
 	viewer: Viewer?,
 	teams: { Team },
 	issues: { Issue },
+	-- Projects scope list (empty outside "projects").
+	projects: { Project },
 	truncated: boolean,
 	-- Epoch seconds of the last successful board load.
 	fetchedAt: number?,
@@ -259,6 +354,14 @@ export type BlockState = {
 	selectedId: string?,
 	-- Full issue for the drawer; nil until loaded.
 	detail: Issue?,
+	-- Full project for the drawer in "projects" scope; nil until loaded.
+	projectDetail: Project?,
+	-- Projects scope: set while the drawer shows an issue opened from this project's milestone tables.
+	-- `selectedId` is then the issue's id; going back restores the project.
+	returnProjectId: string?,
+	-- Milestones expanded in the project drawer, by milestone id ("none" is the no-milestone group).
+	-- Cleared when the selection changes.
+	expandedMilestones: { [string]: boolean },
 	detailLoading: boolean,
 	-- Drawer open (selectedId set and user opened details).
 	drawerOpen: boolean,

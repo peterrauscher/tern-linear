@@ -1,5 +1,5 @@
 --!strict
--- The `main` region: setup screen, top bar, filters, board, table, empty and error states.
+-- The `main` region: setup screen, top bar, filters, board, table, project board, empty and error states.
 -- Pure: nothing here mutates state. The drawer and dialogs come from view_detail as the `layer`.
 
 local detail = require("./view_detail")
@@ -8,8 +8,10 @@ local types = require("./types")
 
 type BlockState = types.BlockState
 type Issue = types.Issue
+type Project = types.Project
 type Team = types.Team
 type Column = model.Column
+type ProjectColumn = model.ProjectColumn
 
 local ui = tern.ui
 
@@ -41,6 +43,16 @@ local STATE_TONES: { [string]: string } = {
 	duplicate = "muted",
 }
 
+-- Project statuses map to tones the same way; planned and paused have no issue-state counterpart.
+local PROJECT_STATUS_TONES: { [string]: string } = {
+	backlog = "muted",
+	planned = "neutral",
+	started = "warning",
+	paused = "info",
+	completed = "success",
+	canceled = "muted",
+}
+
 local PRIORITY_TONES: { [number]: string } = {
 	[1] = "error",
 	[2] = "warning",
@@ -69,6 +81,7 @@ local LAYOUTS: { { id: string, label: string, icon: string } } = {
 }
 
 local MAX_CARD_LABELS = 3
+local MAX_CARD_TEAMS = 2
 local COLUMN_MIN_WIDTH = "30ch"
 -- Pane rows taken by the bar, filter row and column headers; the rest is card space (a row is one
 -- 18px line). The bar wraps onto a second line below BAR_WRAP_COLS, and each banner takes three rows.
@@ -120,6 +133,11 @@ local function filtersActive(state: BlockState): boolean
 		or string.match(state.query.text, "%S") ~= nil
 end
 
+local function projectFiltersActive(state: BlockState): boolean
+	local prefs = state.prefs
+	return prefs.projectTeamId ~= nil or prefs.projectLead ~= nil or string.match(state.query.text, "%S") ~= nil
+end
+
 local function syncedLabel(fetchedAt: number?, now: number): string
 	if fetchedAt == nil then
 		return "Refresh"
@@ -136,6 +154,10 @@ end
 
 local function pluralIssues(count: number): string
 	return if count == 1 then "1 issue" else `{count} issues`
+end
+
+local function pluralProjects(count: number): string
+	return if count == 1 then "1 project" else `{count} projects`
 end
 
 -- ─── Setup and loading ──────────────────────────────────────────────────────
@@ -205,22 +227,31 @@ local function loadingNode(): Node
 end
 
 -- Stands in for the board while a foreground load runs over an already-ready screen.
-local function reloadingNode(): Node
+local function reloadingNode(projects: boolean): Node
+	local label = if projects then "Loading projects…" else "Loading issues…"
 	return ui.node("row", { key = "content", role = "linear.reloading", gap = "sm" }, {
 		ui.node("spinner", { key = "spinner", style = "braille" }),
-		ui.node("text", { key = "label", spans = { ui.span("Loading issues…", "muted") } }),
+		ui.node("text", { key = "label", spans = { ui.span(label, "muted") } }),
 	})
 end
 
 -- ─── Top bar ────────────────────────────────────────────────────────────────
 
 local function scopeSelect(state: BlockState): Node
-	local options: { { value: string, label: string } } = { { value = "mine", label = "My issues" } }
+	local options: { { value: string, label: string } } = {
+		{ value = "mine", label = "My issues" },
+		{ value = "projects", label = "Projects" },
+	}
 	for _, team in state.teams do
 		table.insert(options, { value = team.id, label = `{team.key} · {team.name}` })
 	end
 	local prefs = state.prefs
-	local value = if prefs.scope == "team" and prefs.teamId ~= nil then prefs.teamId else "mine"
+	local value = "mine"
+	if prefs.scope == "projects" then
+		value = "projects"
+	elseif prefs.scope == "team" and prefs.teamId ~= nil then
+		value = prefs.teamId
+	end
 	return ui.node("select", {
 		key = detail.controlKey("team-select", state.controlEpoch),
 		role = "linear.team-select",
@@ -272,7 +303,7 @@ local function searchField(state: BlockState): Node
 		text = state.query.text,
 		cursor = state.query.cursor,
 		anchor = state.query.anchor,
-		placeholder = "Search issues",
+		placeholder = if state.prefs.scope == "projects" then "Search projects" else "Search issues",
 		icon = "search",
 		keys = { "/" },
 		variant = "field",
@@ -321,7 +352,7 @@ local function topBar(state: BlockState, now: number): Node
 		scopeSelect(state),
 		viewSwitcher(state),
 		searchField(state),
-		layoutSwitcher(state),
+		if state.prefs.scope == "projects" then nil else layoutSwitcher(state),
 		barActions(state, now),
 	}, 5)
 	return ui.node("row", { key = KEY_BAR, role = "linear.bar", gap = "sm", wrap = true }, children)
@@ -405,29 +436,110 @@ local function labelSelect(state: BlockState, team: Team?): Node
 	})
 end
 
+-- The scope's controls, then "Clear filters" while any filter is on, and the count of what is shown.
+local function filterBar(state: BlockState, controls: { Node }, active: boolean, summary: { Span | string }): Node
+	local children: { Node } = {}
+	for _, control in controls do
+		table.insert(children, control)
+	end
+	if active then
+		local clear = ui.button("Clear filters", {
+			key = "clear-filters",
+			role = "linear.clear-filters",
+			variant = "quiet",
+			icon = "funnel-x",
+			actions = { click = "clear-filters" },
+		})
+		table.insert(children, clear)
+	end
+	table.insert(children, ui.node("row", { key = "spacer", grow = 1 }))
+	-- Counts of a list that is being replaced would be wrong.
+	if not state.reloading then
+		table.insert(children, ui.node("text", { key = "count", role = "linear.count", spans = summary }))
+	end
+	return ui.node("row", { key = "filters", role = "linear.filters", gap = "sm", wrap = true }, children)
+end
+
 local function filterRow(state: BlockState, team: Team?, visibleCount: number): Node
 	local summary: { Span | string } = { ui.span(pluralIssues(visibleCount), "muted") }
 	if state.truncated then
 		table.insert(summary, ui.span(`  ·  Showing first {#state.issues}`, "warning"))
 	end
-	local children = compact({
-		prioritySelect(state),
-		assigneeSelect(state, team),
-		labelSelect(state, team),
-		if filtersActive(state)
-			then ui.button("Clear filters", {
-				key = "clear-filters",
-				role = "linear.clear-filters",
-				variant = "quiet",
-				icon = "funnel-x",
-				actions = { click = "clear-filters" },
-			})
-			else nil,
-		ui.node("row", { key = "spacer", grow = 1 }),
-		-- Counts of a list that is being replaced would be wrong.
-		if state.reloading then nil else ui.node("text", { key = "count", role = "linear.count", spans = summary }),
-	}, 6)
-	return ui.node("row", { key = "filters", role = "linear.filters", gap = "sm", wrap = true }, children)
+	local controls = { prioritySelect(state), assigneeSelect(state, team), labelSelect(state, team) }
+	return filterBar(state, controls, filtersActive(state), summary)
+end
+
+local function projectTeamSelect(state: BlockState): Node
+	local options: { { value: string, label: string } } = { { value = "", label = "Any team" } }
+	for _, team in state.teams do
+		table.insert(options, { value = team.id, label = `{team.key} · {team.name}` })
+	end
+	return ui.node("select", {
+		key = "filter-project-team",
+		role = "linear.filter-team",
+		value = state.prefs.projectTeamId or "",
+		options = options,
+		variant = "quiet",
+		aria = "Team filter",
+	})
+end
+
+-- Everyone who can lead a project: team members and the leads of the loaded projects, without the viewer.
+local function projectLeads(state: BlockState, viewerId: string?): { types.User }
+	local seen: { [string]: boolean } = {}
+	local leads: { types.User } = {}
+	local function add(user: types.User)
+		if user.id ~= viewerId and not seen[user.id] then
+			seen[user.id] = true
+			table.insert(leads, user)
+		end
+	end
+	for _, team in state.teams do
+		for _, member in team.members do
+			add(member)
+		end
+	end
+	for _, project in state.projects do
+		if project.lead ~= nil then
+			add(project.lead)
+		end
+	end
+	table.sort(leads, function(a, b)
+		local nameA, nameB = string.lower(a.displayName), string.lower(b.displayName)
+		if nameA ~= nameB then
+			return nameA < nameB
+		end
+		return a.id < b.id
+	end)
+	return leads
+end
+
+local function projectLeadSelect(state: BlockState, viewerId: string?): Node
+	local options: { { value: string, label: string } } = {
+		{ value = "", label = "Any lead" },
+		{ value = "me", label = "Me" },
+		{ value = "none", label = "No lead" },
+	}
+	for _, user in projectLeads(state, viewerId) do
+		table.insert(options, { value = user.id, label = user.displayName })
+	end
+	return ui.node("select", {
+		key = "filter-project-lead",
+		role = "linear.filter-lead",
+		value = state.prefs.projectLead or "",
+		options = options,
+		variant = "quiet",
+		aria = "Lead filter",
+	})
+end
+
+local function projectFilterRow(state: BlockState, viewerId: string?, visibleCount: number): Node
+	local summary: { Span | string } = { ui.span(pluralProjects(visibleCount), "muted") }
+	if state.truncated then
+		table.insert(summary, ui.span(`  ·  Showing first {#state.projects}`, "warning"))
+	end
+	local controls = { projectTeamSelect(state), projectLeadSelect(state, viewerId) }
+	return filterBar(state, controls, projectFiltersActive(state), summary)
 end
 
 -- ─── Banners ────────────────────────────────────────────────────────────────
@@ -441,11 +553,11 @@ end
 
 -- ─── Board ──────────────────────────────────────────────────────────────────
 
-local function stateDot(stateType: string): Node
+local function stateDot(stateType: string, tones: { [string]: string }): Node
 	return ui.node("text", {
 		key = "dot",
 		role = "linear.state-dot",
-		tone = STATE_TONES[stateType] or "muted",
+		tone = tones[stateType] or "muted",
 		mark = stateType,
 		spans = { "\u{00A0}" },
 	})
@@ -519,26 +631,35 @@ local function issueCard(issue: Issue, selectedId: string?): Node
 	}, children)
 end
 
-local function boardColumn(column: Column, selectedId: string?, lines: number): Node
-	local cards: { Node } = {}
-	for _, issue in column.issues do
-		table.insert(cards, issueCard(issue, selectedId))
-	end
-	if #cards == 0 then
+type ColumnParts = {
+	id: string,
+	stateType: string,
+	title: string,
+	dot: Node,
+	cards: { Node },
+	-- Placeholder text of a column without cards.
+	empty: string,
+}
+
+-- One column: a head (state dot, title, count) above a scroll of cards, or a placeholder when it has none.
+local function statusColumn(parts: ColumnParts, lines: number): Node
+	local cards = parts.cards
+	local count = #cards
+	if count == 0 then
 		table.insert(
 			cards,
-			ui.node("text", { key = "none", role = "linear.column-empty", spans = { ui.span("No issues", "dim") } })
+			ui.node("text", { key = "none", role = "linear.column-empty", spans = { ui.span(parts.empty, "dim") } })
 		)
 	end
 	local head = ui.node("row", { key = "head", role = "linear.column-head", gap = "sm" }, {
-		stateDot(column.stateType),
-		ui.node("text", { key = "title", spans = { ui.span(column.title, "strong") } }),
-		ui.node("text", { key = "count", spans = { ui.span(tostring(#column.issues), "muted") } }),
+		parts.dot,
+		ui.node("text", { key = "title", spans = { ui.span(parts.title, "strong") } }),
+		ui.node("text", { key = "count", spans = { ui.span(tostring(count), "muted") } }),
 	})
 	return ui.node("col", {
-		key = column.id,
+		key = parts.id,
 		role = "linear.column",
-		mark = column.stateType,
+		mark = parts.stateType,
 		gap = "sm",
 		grow = 1,
 		basis = 0,
@@ -547,6 +668,147 @@ local function boardColumn(column: Column, selectedId: string?, lines: number): 
 		head,
 		ui.node("scroll", { key = "cards", gap = "sm", max = { h = `{lines}lines` } }, cards),
 	})
+end
+
+local function boardColumn(column: Column, selectedId: string?, lines: number): Node
+	local cards: { Node } = {}
+	for _, issue in column.issues do
+		table.insert(cards, issueCard(issue, selectedId))
+	end
+	return statusColumn({
+		id = column.id,
+		stateType = column.stateType,
+		title = column.title,
+		dot = stateDot(column.stateType, STATE_TONES),
+		cards = cards,
+		empty = "No issues",
+	}, lines)
+end
+
+-- The team keys of a project, as many as fit a card with the rest counted; the tooltip names every team.
+local function projectTeams(project: Project): Node?
+	local teams = project.teams
+	if #teams == 0 then
+		return nil
+	end
+	local keys: { string } = {}
+	local names: { string } = {}
+	for index, team in teams do
+		table.insert(names, team.name)
+		if index <= MAX_CARD_TEAMS then
+			table.insert(keys, team.key)
+		end
+	end
+	local label = table.concat(keys, " · ")
+	if #teams > MAX_CARD_TEAMS then
+		label ..= ` +{#teams - MAX_CARD_TEAMS}`
+	end
+	return ui.node("text", {
+		key = "teams",
+		title = table.concat(names, ", "),
+		spans = { ui.span(label, "mono muted") },
+	})
+end
+
+local function projectCardHead(project: Project): Node
+	local priorityTone = PRIORITY_TONES[project.priority]
+	local health = detail.healthBadge(project.health)
+	local children = compact({
+		projectTeams(project),
+		ui.node("row", { key = "spacer", grow = 1 }),
+		if health ~= nil then with(health, { key = "health" }) else nil,
+		if priorityTone ~= nil
+			then with(ui.badge(model.priorityLabel(project.priority), priorityTone), {
+				key = "priority",
+				mark = `priority-{project.priority}`,
+			})
+			else nil,
+	}, 4)
+	return ui.node("row", { key = "head", gap = "xs" }, children)
+end
+
+local function projectSummary(project: Project): Node?
+	if string.match(project.description, "%S") == nil then
+		return nil
+	end
+	return ui.node("text", {
+		key = "summary",
+		role = "linear.project-summary",
+		max = { h = "2lines" },
+		spans = { ui.span(project.description, "muted") },
+	})
+end
+
+local function targetDate(project: Project): Node?
+	local date = project.targetDate
+	if date == nil then
+		return nil
+	end
+	return ui.node("text", { key = "target", mark = "target", spans = { ui.span(`Target {date}`, "muted") } })
+end
+
+-- Tern's progress bar with the percentage as its label; closed projects take their status tone, open ones the accent.
+local function projectProgress(project: Project): Node
+	local statusType = project.status.type
+	local percent = model.progressPercent(project.progress)
+	local tone = if model.isClosedProjectType(statusType) then PROJECT_STATUS_TONES[statusType] else nil
+	local bar = with(ui.progress(project.progress, { ui.span(`{percent}%`, "mono muted") }), {
+		key = "bar",
+		role = "linear.project-progress",
+		tone = tone,
+		grow = 1,
+	})
+	return ui.node("row", { key = "progress", gap = "sm", wrap = true }, compact({ bar, targetDate(project) }, 2))
+end
+
+local function projectLead(project: Project): Node?
+	local lead = project.lead
+	if lead == nil then
+		return nil
+	end
+	return ui.node("text", {
+		key = "lead",
+		role = "linear.card-assignee",
+		title = lead.name,
+		spans = { ui.span(lead.displayName, "muted") },
+	})
+end
+
+local function projectCard(project: Project, selectedId: string?): Node
+	local children = compact({
+		projectCardHead(project),
+		ui.node("text", {
+			key = "title",
+			role = "linear.card-title",
+			max = { h = "2lines" },
+			spans = { ui.span(project.name, "strong") },
+		}),
+		projectSummary(project),
+		projectProgress(project),
+		projectLead(project),
+	}, 5)
+	return ui.node("col", {
+		key = project.id,
+		role = "linear.project-card",
+		gap = "xs",
+		mark = if project.id == selectedId then "selected" else nil,
+		actions = { click = `select={project.id}` },
+	}, children)
+end
+
+local function projectColumn(column: ProjectColumn, selectedId: string?, lines: number): Node
+	local cards: { Node } = {}
+	for _, project in column.projects do
+		table.insert(cards, projectCard(project, selectedId))
+	end
+	return statusColumn({
+		id = column.id,
+		stateType = column.statusType,
+		title = column.title,
+		dot = stateDot(column.statusType, PROJECT_STATUS_TONES),
+		cards = cards,
+		empty = "No projects",
+	}, lines)
 end
 
 local function chromeRows(state: BlockState, cx: BlockCx): number
@@ -563,14 +825,28 @@ local function chromeRows(state: BlockState, cx: BlockCx): number
 	return rows
 end
 
+local function columnLines(state: BlockState, cx: BlockCx): number
+	return math.max(MIN_COLUMN_LINES, cx.rows - chromeRows(state, cx))
+end
+
 local function board(state: BlockState, cx: BlockCx, visible: { Issue }, team: Team?): Node
 	local columns = model.columns(visible, state.prefs, team)
-	local lines = math.max(MIN_COLUMN_LINES, cx.rows - chromeRows(state, cx))
+	local lines = columnLines(state, cx)
 	local children: { Node } = {}
 	for _, column in columns do
 		table.insert(children, boardColumn(column, state.selectedId, lines))
 	end
 	return ui.node("row", { key = "content", role = "linear.board", gap = "md", align = "start" }, children)
+end
+
+local function projectBoard(state: BlockState, cx: BlockCx, visible: { Project }): Node
+	local columns = model.projectColumns(visible, state.prefs.view)
+	local lines = columnLines(state, cx)
+	local children: { Node } = {}
+	for _, column in columns do
+		table.insert(children, projectColumn(column, state.returnProjectId or state.selectedId, lines))
+	end
+	return ui.node("row", { key = "content", role = "linear.projects-board", gap = "md", align = "start" }, children)
 end
 
 -- ─── Table ──────────────────────────────────────────────────────────────────
@@ -640,15 +916,17 @@ end
 -- ─── Content ────────────────────────────────────────────────────────────────
 
 local function emptyState(state: BlockState): { Node }
-	local filtered = filtersActive(state)
 	local prefs = state.prefs
+	local projects = prefs.scope == "projects"
+	local filtered = if projects then projectFiltersActive(state) else filtersActive(state)
+	local noun = if projects then "projects" else "issues"
 	local nodes: { Node } = {
 		ui.node("empty", {
 			key = "content",
 			role = "linear.empty",
 			variant = "center",
 			icon = if filtered then "funnel-x" else "inbox",
-			title = if filtered then "No matching issues" else "No issues in this view",
+			title = if filtered then `No matching {noun}` else `No {noun} in this view`,
 		}),
 	}
 	local buttons: { Node } = {}
@@ -662,6 +940,13 @@ local function emptyState(state: BlockState): { Node }
 				actions = { click = "clear-filters" },
 			})
 		)
+	elseif projects then
+		if prefs.view ~= "all" then
+			table.insert(
+				buttons,
+				ui.button("All", { key = "empty-all", role = "linear.empty-all", actions = { click = "view=all" } })
+			)
+		end
 	elseif prefs.scope == "mine" and prefs.view == "active" then
 		table.insert(
 			nodes,
@@ -697,7 +982,7 @@ end
 
 local function content(state: BlockState, cx: BlockCx, visible: { Issue }, team: Team?, now: number): { Node }
 	if state.reloading then
-		return { reloadingNode() }
+		return { reloadingNode(false) }
 	end
 	if #visible == 0 then
 		return emptyState(state)
@@ -708,20 +993,40 @@ local function content(state: BlockState, cx: BlockCx, visible: { Issue }, team:
 	return { board(state, cx, visible, team) }
 end
 
+local function projectContent(state: BlockState, cx: BlockCx, visible: { Project }): { Node }
+	if state.reloading then
+		return { reloadingNode(true) }
+	end
+	if #visible == 0 then
+		return emptyState(state)
+	end
+	return { projectBoard(state, cx, visible) }
+end
+
 local function readyChildren(state: BlockState, cx: BlockCx): { Node }
 	local now = os.time()
-	local team = selectedTeam(state)
 	local viewerId = if state.viewer ~= nil then state.viewer.user.id else nil
-	local visible = model.visible(state.issues, state.prefs, state.query.text, viewerId)
+	local filters: Node
+	local body: { Node }
+	if state.prefs.scope == "projects" then
+		local visible = model.visibleProjects(state.projects, state.prefs, state.query.text, viewerId)
+		filters = projectFilterRow(state, viewerId, #visible)
+		body = projectContent(state, cx, visible)
+	else
+		local team = selectedTeam(state)
+		local visible = model.visible(state.issues, state.prefs, state.query.text, viewerId)
+		filters = filterRow(state, team, #visible)
+		body = content(state, cx, visible, team, now)
+	end
 	local failure = state.error
 	local notice = state.notice
 	local children = compact({
 		topBar(state, now),
-		filterRow(state, team, #visible),
+		filters,
 		if failure ~= nil then banner("error", "linear.error", "error", "x-circle", failure) else nil,
 		if notice ~= nil then banner("notice", "linear.notice", "success", "check", notice) else nil,
 	}, 4)
-	for _, node in content(state, cx, visible, team, now) do
+	for _, node in body do
 		table.insert(children, node)
 	end
 	return children

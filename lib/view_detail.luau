@@ -1,5 +1,6 @@
 --!strict
--- The `layer` region: issue drawer (details, inline edit form, relations, comments) and the create dialog.
+-- The `layer` region: issue and project drawers (details, inline edit form, relations, comments, milestones) and the
+-- create dialog.
 -- Pure: reads the block state, never mutates it. Node ids are `<parent id>.<key or index>`, so every ancestor
 -- of a focusable field is keyed and the ids below are constants the controller can focus.
 
@@ -15,6 +16,9 @@ type User = types.User
 type IssueRef = types.IssueRef
 type Relation = types.Relation
 type Comment = types.Comment
+type Project = types.Project
+type ProjectMilestone = types.ProjectMilestone
+type ProjectIssue = types.ProjectIssue
 type Form = types.Form
 type FormField = types.FormField
 type LinkDraft = types.LinkDraft
@@ -75,7 +79,7 @@ local BUSY_REASON = "Working…"
 local MIN_DRAWER_COLS = 44
 local DRAWER_FRACTION = 0.45
 
--- Span tokens per workflow state type (see ARCHITECTURE.md, Styling rules).
+-- Span tokens per workflow state type and per project status type (see ARCHITECTURE.md, Styling rules).
 local STATE_TOKEN: { [string]: string } = {
 	triage = "info",
 	backlog = "muted",
@@ -84,6 +88,23 @@ local STATE_TOKEN: { [string]: string } = {
 	completed = "success",
 	canceled = "muted",
 	duplicate = "muted",
+	planned = "",
+	paused = "info",
+}
+
+-- Badge tone per project health value.
+local HEALTH_TONES: { [string]: string } = {
+	onTrack = "success",
+	atRisk = "warning",
+	offTrack = "error",
+}
+
+-- Dot token and tooltip per milestone status.
+local MILESTONE_STATUS: { [string]: { label: string, token: string } } = {
+	done = { label = "Done", token = "success" },
+	next = { label = "Next", token = "warning" },
+	overdue = { label = "Overdue", token = "error" },
+	unstarted = { label = "Not started", token = "muted" },
 }
 
 local function with(node: Node, props: { [string]: any }): Node
@@ -121,6 +142,19 @@ local function stateDot(stateType: string): Span
 	return ui.span("●", STATE_TOKEN[stateType])
 end
 
+-- A badge for a project health value ("onTrack", "atRisk", "offTrack"); nil for none or an unknown value.
+function detail.healthBadge(health: string?): Node?
+	if health == nil then
+		return nil
+	end
+	local tone = HEALTH_TONES[health]
+	local label = model.HEALTH_LABELS[health]
+	if tone == nil or label == nil then
+		return nil
+	end
+	return ui.badge(label, tone)
+end
+
 local function findTeam(teams: { Team }, id: string): Team?
 	for _, team in teams do
 		if team.id == id then
@@ -139,6 +173,20 @@ local function currentIssue(state: BlockState): Issue?
 	for _, issue in state.issues do
 		if issue.id == id then
 			return issue
+		end
+	end
+	return nil
+end
+
+local function currentProject(state: BlockState): Project?
+	local id = state.selectedId
+	local full = state.projectDetail
+	if full and full.id == id then
+		return full
+	end
+	for _, project in state.projects do
+		if project.id == id then
+			return project
 		end
 	end
 	return nil
@@ -278,6 +326,16 @@ end
 
 -- ─── Drawer: header, actions, properties ────────────────────────────────────
 
+local function headerNode(title: string, parts: { string }): Node
+	return with(
+		ui.col({
+			with(ui.text({ ui.span(title, "strong") }), { key = "title", role = "linear.title" }),
+			with(muted(table.concat(parts, "  ·  ")), { key = "meta", role = "linear.meta" }),
+		}),
+		{ key = "header", role = "linear.header", gap = "xs" }
+	)
+end
+
 local function headerSection(issue: Issue): Node
 	local parts = { issue.teamKey }
 	local now = os.time()
@@ -286,13 +344,7 @@ local function headerSection(issue: Issue): Node
 	if issue.creator then
 		table.insert(parts, "by " .. userLabel(issue.creator))
 	end
-	return with(
-		ui.col({
-			with(ui.text({ ui.span(issue.title, "strong") }), { key = "title", role = "linear.title" }),
-			with(muted(table.concat(parts, "  ·  ")), { key = "meta", role = "linear.meta" }),
-		}),
-		{ key = "header", role = "linear.header", gap = "xs" }
-	)
+	return headerNode(issue.title, parts)
 end
 
 local function iconButton(key: string, icon: string, title: string, action: string): Node
@@ -306,15 +358,35 @@ local function iconButton(key: string, icon: string, title: string, action: stri
 	})
 end
 
-local function closeButton(): Node
+-- `esc` is shown on the close button unless a back button owns it.
+local function closeButton(esc: boolean): Node
 	return ui.button("", {
 		key = "close",
 		icon = "x",
 		size = "sm",
 		variant = "quiet",
 		title = "Close",
-		keys = { "esc" },
+		keys = if esc then { "esc" } else nil,
 		actions = { click = "close-detail" },
+	})
+end
+
+-- Back from an issue opened from a project's milestone tables to that project.
+local function backButton(state: BlockState): Node?
+	if state.returnProjectId == nil then
+		return nil
+	end
+	local project = state.projectDetail
+	local label = if project ~= nil and project.id == state.returnProjectId then project.name else "Project"
+	return ui.button(label, {
+		key = "back",
+		role = "linear.back-to-project",
+		icon = "arrow-left",
+		size = "sm",
+		variant = "quiet",
+		title = "Back to project",
+		keys = { "esc" },
+		actions = { click = "back-to-project" },
 	})
 end
 
@@ -847,7 +919,11 @@ local function drawer(state: BlockState, cx: BlockCx, issue: Issue): Node
 	local form = state.form
 	local editing = form ~= nil and form.kind == "edit" and form.issueId == issue.id
 
-	local children: { Node } = { closeButton() }
+	local children: { Node } = { closeButton(state.returnProjectId == nil) }
+	local back = backButton(state)
+	if back ~= nil then
+		table.insert(children, back)
+	end
 	if form ~= nil and editing then
 		table.insert(children, editForm(state, form))
 	else
@@ -879,6 +955,295 @@ local function drawer(state: BlockState, cx: BlockCx, issue: Issue): Node
 	}, children)
 end
 
+-- ─── Project drawer ─────────────────────────────────────────────────────────
+
+local function projectHeader(project: Project): Node
+	local parts: { string } = {}
+	if #project.teams > 0 then
+		local keys: { string } = {}
+		for _, team in project.teams do
+			table.insert(keys, team.key)
+		end
+		table.insert(parts, table.concat(keys, ", "))
+	end
+	local now = os.time()
+	table.insert(parts, "created " .. model.relativeTime(project.createdAt, now))
+	table.insert(parts, "updated " .. model.relativeTime(project.updatedAt, now))
+	if project.creator then
+		table.insert(parts, "by " .. userLabel(project.creator))
+	end
+	return headerNode(project.name, parts)
+end
+
+local function projectActionRow(project: Project): Node
+	local open = ui.button("Open in Linear", {
+		key = "open",
+		role = "linear.open-url",
+		size = "sm",
+		keys = { "o" },
+		actions = { click = "open-url=" .. project.id },
+	})
+	return with(ui.row({ open }), { key = "actions", role = "linear.actions", wrap = true })
+end
+
+local function projectProps(project: Project): Node
+	local status: { Span | string } = { stateDot(project.status.type), "  " .. project.status.name }
+	local percent = model.progressPercent(project.progress)
+	local lead = if project.lead ~= nil then userLabel(project.lead) else "No lead"
+	local rows: { Node } = {
+		propRow("status", "Status", with(ui.text(status), { key = "value" })),
+		propRow("progress", "Progress", with(ui.text(`{percent}%`), { key = "value" })),
+	}
+	local health = detail.healthBadge(project.health)
+	if health ~= nil then
+		table.insert(rows, propRow("health", "Health", with(health, { key = "value" })))
+	end
+	table.insert(rows, propRow("priority", "Priority", with(ui.text(project.priorityLabel), { key = "value" })))
+	table.insert(rows, propRow("lead", "Lead", with(ui.text(lead), { key = "value" })))
+	if #project.teams > 0 then
+		local teams: { string } = {}
+		for _, team in project.teams do
+			table.insert(teams, `{team.key} ({team.name})`)
+		end
+		table.insert(rows, propRow("teams", "Teams", with(ui.text(table.concat(teams, ", ")), { key = "value" })))
+	end
+	if project.startDate ~= nil or project.targetDate ~= nil then
+		local dates = `{project.startDate or "—"} → {project.targetDate or "—"}`
+		table.insert(rows, propRow("dates", "Dates", with(ui.text(dates), { key = "value" })))
+	end
+	return with(ui.col(rows), { key = "props", role = "linear.props", gap = "xs" })
+end
+
+-- The long-form content, else the short summary, else a placeholder once the detail has loaded.
+local function projectDescriptionSection(state: BlockState, project: Project): Node?
+	if not project.detailed and state.detailLoading then
+		return with(ui.col({ loadingLine() }), { key = "description", role = "linear.description-loading" })
+	end
+	local content = project.content
+	local body = if content ~= nil and not isBlank(content) then content else project.description
+	if isBlank(body) then
+		if not project.detailed then
+			return nil
+		end
+		return with(muted("No description"), { key = "description", role = "linear.description-empty" })
+	end
+	return with(ui.md(text.safeMarkdown(body)), { key = "description", role = "linear.description" })
+end
+
+-- Group key of the issues that belong to no milestone; the controller toggles it as `toggle-milestone=none`.
+local NO_MILESTONE = "none"
+
+-- The issues of one milestone (`nil` for the issues without a milestone), in their loaded order.
+local function issuesOf(issues: { ProjectIssue }, milestoneId: string?): { ProjectIssue }
+	local out: { ProjectIssue } = {}
+	for _, issue in issues do
+		if issue.milestoneId == milestoneId then
+			table.insert(out, issue)
+		end
+	end
+	return out
+end
+
+-- One issue row. Plain clickable rows instead of `ui.table`: table rows only emit `select`/`activate` events, which the
+-- controller maps to the issue table, while a row node carries its own `open-issue=<id>` click action.
+local function milestoneIssueRow(issue: ProjectIssue): Node
+	local assignee = if issue.assignee ~= nil then userLabel(issue.assignee) else "Unassigned"
+	local children: { Node } = {
+		with(muted(issue.identifier), { key = "id", mark = "id" }),
+		with(ui.text({ issue.title }), { key = "title", mark = "title", grow = 1 }),
+		with(
+			ui.text({ stateDot(issue.stateType), ui.span(" " .. issue.stateName) }),
+			{ key = "status", mark = "status" }
+		),
+		with(muted(assignee), { key = "assignee", mark = "assignee" }),
+	}
+	return ui.node("row", {
+		key = issue.id,
+		role = "linear.milestone-issue",
+		gap = "sm",
+		actions = { click = "open-issue=" .. issue.id },
+	}, children)
+end
+
+local function milestoneIssuesHead(): Node
+	local children: { Node } = {
+		with(muted("ID"), { key = "id", mark = "id" }),
+		with(muted("Title"), { key = "title", mark = "title", grow = 1 }),
+		with(muted("Status"), { key = "status", mark = "status" }),
+		with(muted("Assignee"), { key = "assignee", mark = "assignee" }),
+	}
+	return ui.node("row", { key = "head", role = "linear.milestone-issues-head", gap = "sm" }, children)
+end
+
+-- The issue table of an expanded group: a loading line until the issues arrive, a placeholder for none.
+local function milestoneIssues(issues: { ProjectIssue }?): Node
+	local children: { Node }
+	if issues == nil then
+		children = { loadingLine() }
+	elseif #issues == 0 then
+		children = { with(muted("No issues"), { key = "empty", role = "linear.milestone-empty" }) }
+	else
+		children = { milestoneIssuesHead() }
+		for _, issue in issues do
+			table.insert(children, milestoneIssueRow(issue))
+		end
+	end
+	return with(ui.col(children), { key = "issues", role = "linear.milestone-issues", gap = "xs" })
+end
+
+-- The clickable head of a group: a disclosure chevron, the caller's cells (the `linear.milestone-head` row), and the
+-- issue count (once loaded).
+local function toggleHead(groupId: string, expanded: boolean, cells: { Node }, count: number?): Node
+	local children: { Node } = {
+		with(muted(if expanded then "▾" else "▸"), { key = "chevron", mark = "chevron" }),
+		ui.node("row", { key = "row", role = "linear.milestone-head", gap = "sm", grow = 1 }, cells),
+	}
+	if count ~= nil then
+		table.insert(children, with(muted(tostring(count)), { key = "count", mark = "count", title = "Issues" }))
+	end
+	return ui.node("row", {
+		key = "head",
+		role = "linear.milestone-toggle",
+		gap = "sm",
+		mark = if expanded then "expanded" else nil,
+		actions = { click = "toggle-milestone=" .. groupId },
+	}, children)
+end
+
+local function milestoneHead(milestone: ProjectMilestone, expanded: boolean, count: number?): Node
+	local status = MILESTONE_STATUS[milestone.status] or MILESTONE_STATUS.unstarted
+	local percent = model.progressPercent(milestone.progress)
+	local cells: { Node } = {
+		with(ui.text({ ui.span("●", status.token) }), { key = "status", mark = "status", title = status.label }),
+		with(ui.text({ ui.span(milestone.name, "strong") }), { key = "name", grow = 1 }),
+	}
+	if milestone.targetDate ~= nil then
+		table.insert(cells, with(muted(milestone.targetDate), { key = "target", mark = "target" }))
+	end
+	table.insert(cells, with(muted(`{percent}%`), { key = "percent", mark = "percent" }))
+	return toggleHead(milestone.id, expanded, cells, count)
+end
+
+local function milestoneNode(state: BlockState, project: Project, milestone: ProjectMilestone): Node
+	local expanded = state.expandedMilestones[milestone.id] == true
+	local issues = if project.issues ~= nil then issuesOf(project.issues, milestone.id) else nil
+	local children: { Node } = { milestoneHead(milestone, expanded, if issues ~= nil then #issues else nil) }
+	local description = milestone.description
+	if description ~= nil and not isBlank(description) then
+		local body = ui.md(text.safeMarkdown(description))
+		table.insert(children, with(body, { key = "description", role = "linear.milestone-description" }))
+	end
+	if expanded then
+		table.insert(children, milestoneIssues(issues))
+	end
+	return with(ui.col(children), { key = milestone.id, role = "linear.milestone", gap = "xs" })
+end
+
+-- The issues without a milestone, as a group shaped like a milestone; nil while loading or when there are none.
+local function noMilestoneNode(state: BlockState, project: Project): Node?
+	if project.issues == nil then
+		return nil
+	end
+	local issues = issuesOf(project.issues, nil)
+	if #issues == 0 then
+		return nil
+	end
+	local expanded = state.expandedMilestones[NO_MILESTONE] == true
+	local cells: { Node } = { with(ui.text({ ui.span("No milestone", "strong") }), { key = "name", grow = 1 }) }
+	local children: { Node } = { toggleHead(NO_MILESTONE, expanded, cells, #issues) }
+	if expanded then
+		table.insert(children, milestoneIssues(issues))
+	end
+	return with(ui.col(children), { key = NO_MILESTONE, role = "linear.milestone", gap = "xs" })
+end
+
+local function milestonesSection(state: BlockState, project: Project): Node?
+	local milestones = project.milestones
+	if milestones == nil and not state.detailLoading then
+		return nil
+	end
+	local children: { Node } = { sectionHeading("Milestones", if milestones ~= nil then #milestones else nil) }
+	local issues = project.issues
+	if project.issuesTruncated and issues ~= nil then
+		table.insert(children, with(muted(`Showing first {#issues} issues`), { key = "truncated" }))
+	end
+	if milestones == nil then
+		table.insert(children, loadingLine())
+	else
+		for _, milestone in milestones do
+			table.insert(children, milestoneNode(state, project, milestone))
+		end
+		local none = noMilestoneNode(state, project)
+		if none ~= nil then
+			table.insert(children, none)
+		end
+		if #milestones == 0 and none == nil then
+			table.insert(children, with(muted("No milestones"), { key = "none" }))
+		end
+	end
+	return with(ui.col(children), { key = "milestones", role = "linear.milestones" })
+end
+
+local function projectDrawer(state: BlockState, cx: BlockCx, project: Project): Node
+	local children: { Node } = {
+		closeButton(true),
+		projectHeader(project),
+		projectActionRow(project),
+		projectProps(project),
+	}
+	local description = projectDescriptionSection(state, project)
+	if description then
+		table.insert(children, description)
+	end
+	local milestones = milestonesSection(state, project)
+	if milestones then
+		table.insert(children, milestones)
+	end
+
+	return ui.node("overlay", {
+		key = "panel",
+		role = "linear.drawer",
+		side = "right",
+		size = drawerSize(cx.cols),
+		head = "Project",
+		meta = project.status.name,
+		["end"] = PANEL .. ".close",
+	}, children)
+end
+
+-- An issue opened from a milestone table before its detail arrives: the row's identifier and title.
+local function issueLoadingDrawer(state: BlockState, cx: BlockCx): Node
+	local project = state.projectDetail
+	local issues: { ProjectIssue } = if project ~= nil and project.issues ~= nil then project.issues else {}
+	local row: ProjectIssue? = nil
+	for _, issue in issues do
+		if issue.id == state.selectedId then
+			row = issue
+		end
+	end
+	local children: { Node } = { closeButton(false) }
+	local back = backButton(state)
+	if back ~= nil then
+		table.insert(children, back)
+	end
+	if row ~= nil then
+		table.insert(
+			children,
+			with(ui.text({ ui.span(row.title, "strong") }), { key = "title", role = "linear.title" })
+		)
+	end
+	table.insert(children, loadingLine())
+	return ui.node("overlay", {
+		key = "panel",
+		role = "linear.drawer",
+		side = "right",
+		size = drawerSize(cx.cols),
+		head = if row ~= nil then row.identifier else "Issue",
+		meta = if row ~= nil then row.stateName else nil,
+		["end"] = PANEL .. ".close",
+	}, children)
+end
+
 -- ─── Layer ──────────────────────────────────────────────────────────────────
 
 function detail.layer(state: BlockState, cx: BlockCx): Node?
@@ -887,9 +1252,18 @@ function detail.layer(state: BlockState, cx: BlockCx): Node?
 	if form ~= nil and form.kind == "create" then
 		panel = dialog(state, form)
 	elseif state.drawerOpen and state.selectedId ~= nil then
-		local issue = currentIssue(state)
-		if issue then
-			panel = drawer(state, cx, issue)
+		if state.prefs.scope == "projects" and state.returnProjectId == nil then
+			local project = currentProject(state)
+			if project then
+				panel = projectDrawer(state, cx, project)
+			end
+		else
+			local issue = currentIssue(state)
+			if issue then
+				panel = drawer(state, cx, issue)
+			elseif state.returnProjectId ~= nil then
+				panel = issueLoadingDrawer(state, cx)
+			end
 		end
 	end
 	if panel == nil then

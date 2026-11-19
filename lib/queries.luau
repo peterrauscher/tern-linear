@@ -148,4 +148,56 @@ queries.IssuesChanged = [[query IssuesChanged($filter: IssueFilter, $includeArch
   }
 }]]
 
+queries.Projects =
+	[[query Projects($filter: ProjectFilter, $first: Int = 50, $after: String, $orderBy: PaginationOrderBy = updatedAt, $includeArchived: Boolean = false) {
+  projects(filter: $filter, first: $first, after: $after, orderBy: $orderBy, includeArchived: $includeArchived) {
+    nodes {
+      id slugId name description priority priorityLabel progress health url sortOrder
+      startDate targetDate createdAt updatedAt completedAt canceledAt archivedAt
+      status { id name type color position }
+      lead { id name displayName avatarUrl }
+      teams(first: 10) { nodes { id key name } }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}]]
+
+queries.Project = [[query Project($id: String!, $milestonesFirst: Int = 50, $milestonesAfter: String) {
+  project(id: $id) {
+    id slugId name description content priority priorityLabel progress health url sortOrder
+    startDate targetDate createdAt updatedAt completedAt canceledAt archivedAt
+    status { id name type color position }
+    creator { id name displayName avatarUrl }
+    lead { id name displayName avatarUrl }
+    teams(first: 25) { nodes { id key name } }
+    projectMilestones(first: $milestonesFirst, after: $milestonesAfter) {
+      nodes { id name description status progress sortOrder targetDate createdAt updatedAt }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}]]
+
+-- The project's issues for the drawer's milestone tables; paged after `Project`.
+queries.ProjectIssues = [[query ProjectIssues($id: String!, $first: Int = 50, $after: String) {
+  project(id: $id) {
+    issues(first: $first, after: $after) {
+      nodes {
+        id identifier title sortOrder
+        state { name type }
+        team { id }
+        assignee { id name displayName avatarUrl }
+        projectMilestone { id }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}]]
+
+-- Cheap change detection: the most recently updated project under the Projects board's filter.
+queries.ProjectsChanged = [[query ProjectsChanged($filter: ProjectFilter, $includeArchived: Boolean = false) {
+  projects(filter: $filter, first: 1, orderBy: updatedAt, includeArchived: $includeArchived) {
+    nodes { id updatedAt }
+  }
+}]]
+
 return queries

@@ -41,7 +41,8 @@ Every module starts with `--!strict` and requires siblings with `require("./x")`
 local queries = {}
 queries.Viewer = [[query Viewer { ... }]]
 -- Teams, TeamMore, Issues, Issue, IssueCreate, IssueUpdate, CommentCreate,
--- IssueRelationCreate, IssueRelationDelete, IssueLookup, IssuesChanged
+-- IssueRelationCreate, IssueRelationDelete, IssueLookup, IssuesChanged,
+-- Projects, Project, ProjectIssues, ProjectsChanged
 return queries
 ```
 
@@ -71,6 +72,11 @@ linear.issues(cfg, filter: any, cb: Callback<IssuePage>)    -- pages Issues (fir
 linear.changedSince(cfg, filter: any, sinceIso: string?, cb: Callback<string?>)
     -- IssuesChanged with filter AND {updatedAt: {gt: sinceIso}}; result = newest updatedAt or nil
 linear.issue(cfg, id: string, cb: Callback<Issue>)          -- detail; all comment pages, ascending
+linear.projects(cfg, filter: any, cb: Callback<ProjectPage>) -- pages Projects (first 50) up to MAX_PROJECTS = 250
+linear.projectsChangedSince(cfg, filter: any, sinceIso: string?, cb: Callback<string?>)
+    -- ProjectsChanged with filter AND {updatedAt: {gt: sinceIso}}; result = newest updatedAt or nil
+linear.project(cfg, id: string, cb: Callback<Project>)
+    -- detail with content; all milestone pages, sorted; then ProjectIssues pages up to MAX_PROJECT_ISSUES = 250
 linear.lookup(cfg, identifier: string, cb: Callback<IssueRef?>) -- nil result (no error) when not found
 linear.createIssue(cfg, input: IssueCreateInput, cb: Callback<Issue>)
 linear.updateIssue(cfg, id: string, patch: {[string]: any}, cb: Callback<Issue>)
@@ -83,7 +89,7 @@ linear.rate(): RateInfo
 
 Error classification (`ApiError.kind`): `status == 0` or timeout → `network`; HTTP 401 or `AUTHENTICATION_ERROR` → `auth`; 403 or `FORBIDDEN` → `forbidden`; `RATELIMITED` at any status → `rate` (`retryAfterMs` from `retry-after` seconds, else reset headers minus now, floor 60 000); `Entity not found` / `ENTITY_NOT_FOUND` → `notfound`; `userError == true` or `INPUT_ERROR` → `input` with `userPresentableMessage`; anything else → `server`. A mutation payload with `success == false` is `server`. Messages never include the key.
 
-Normalization: `Issue.relations` merges `relations` (direction `outgoing`) and `inverseRelations` (direction `incoming`); `labels` drops nothing; `assignee` is nil when null (note `tern.json.decode` drops null members). `Team.states` is sorted by `model.STATE_TYPES` rank then `position`; group labels and inactive members are removed. Timeouts: 20 s per request.
+Normalization: `Issue.relations` merges `relations` (direction `outgoing`) and `inverseRelations` (direction `incoming`); `labels` drops nothing; `assignee` is nil when null (note `tern.json.decode` drops null members). `Team.states` is sorted by `model.STATE_TYPES` rank then `position`; group labels and inactive members are removed. `Project.progress` is clamped to 0..1; `Project.milestones` (detail only) is sorted by `sortOrder`, then `targetDate` (dated first), then `createdAt`, then `id`. `Project.content` and `Project.issues` are only fetched by `linear.project`; `Project.issues` is sorted by state type rank, then `sortOrder`, and `issuesTruncated` is set when the cap was reached. Timeouts: 20 s per request.
 
 ### `lib/text.luau`
 
@@ -130,17 +136,34 @@ model.epoch(iso: string): number?            -- UTC seconds; handles fractional 
 model.relativeTime(iso: string, now: number): string  -- "now", "5m", "3h", "2d", "Mar 4"
 model.parseIdentifier(s: string): (string?, number?)  -- "eng-12" → "ENG", 12
 model.formDiff(form: Form): {[string]: string}  -- fields whose current value differs from baseline
+model.PROJECT_STATUS_TYPES: {string} -- {"backlog","planned","started","paused","completed","canceled"}
+model.PROJECT_TYPE_TITLES: {[string]: string} -- backlog "Backlog", planned "Planned", started "In Progress",
+                                              -- paused "Paused", completed "Completed", canceled "Canceled"
+model.HEALTH_LABELS: {[string]: string}       -- onTrack "On track", atRisk "At risk", offTrack "Off track"
+model.projectTypeRank(t: string): number
+model.isClosedProjectType(t: string): boolean -- completed, canceled
+model.projectViewTypes(view: string): {string}
+    -- active: planned/started/paused; backlog: backlog; all: every project status type
+model.projectServerFilter(prefs: Prefs): any -- ProjectFilter; "all" adds projects closed in the last 14 days
+model.visibleProjects(projects, prefs, query: string, viewerId: string?): {Project}
+    -- client filters (query over name/description/lead/team key and name, projectTeamId, projectLead),
+    -- deduped by id, ordered by status rank, then priority (1..4 then 0), sortOrder, name
+model.projectColumns(visible: {Project}, view: string): {ProjectColumn}
+    -- one column per status type in projectViewTypes(view) (empty ones included)
+model.progressPercent(progress: number): number -- 0..100, rounded
 ```
 
-`Column = { id: string, title: string, stateType: string, stateId: string?, color: string?, issues: {Issue} }` is exported from `model.luau` as `model.Column`.
+`Column = { id: string, title: string, stateType: string, stateId: string?, color: string?, issues: {Issue} }` is exported from `model.luau` as `model.Column`. `ProjectColumn = { id: string, title: string, statusType: string, projects: {Project} }` is exported as `model.ProjectColumn`.
 
 ### `lib/controller.luau`
 
 Exports `controller.def: BlockDef<BlockState>` with `font = "sans"`, `features = { "edit" }`, `init`, `view` (delegates to `view.render`), `title`, `key`, `event`, `save`.
 
-- `save` persists `Prefs` only. Data, drafts, errors and the key are never saved.
-- `title` returns `"Linear"`, or `"Linear · <TEAM KEY>"` / `"Linear · My issues"` once ready.
-- `init` resolves credentials: none → `phase = "setup"`, focus the key field; otherwise `phase = "loading"`, foreground load (`viewer` → `teams` → `issues`).
+- `save` persists `Prefs` only (`scope` may be `"projects"`). Data, drafts, errors, the key and the session-only filters (`priority`, `assignee`, `labelId`, `projectTeamId`, `projectLead`) are never saved.
+- `title` returns `"Linear"`, or `"Linear · <TEAM KEY>"` / `"Linear · My issues"` / `"Linear · Projects"` once ready.
+- `init` resolves credentials: none → `phase = "setup"`, focus the key field; otherwise `phase = "loading"`, foreground load (`viewer` → `teams` → `issues`, or `projects` in Projects scope).
+
+Projects scope (`prefs.scope == "projects"`) loads `state.projects` instead of `state.issues` and keeps the drawer's project in `state.projectDetail` (separate from `state.detail`). While a project is selected, issue mutations and their keys do nothing, and `v` (layout) is ignored: projects always render as status columns of cards. An issue opened from a milestone table sets `state.returnProjectId` to the project and `selectedId` to the issue: the drawer then shows the full issue drawer (all issue actions and keys work) with a back button, the board stays on Projects, and Escape, the back button or closing the drawer restores the project selection. The controller's local `projectSelected(state)` is the single test for "selectedId names a project".
 
 Request discipline (learned from beads-tern):
 
@@ -150,7 +173,7 @@ Request discipline (learned from beads-tern):
 4. Mutations are followed by an authoritative reload of the board (background) and, if the drawer is open, of the detail. No optimistic updates except applying the returned issue to the list.
 5. A failure sets `state.error` (banner) or `form.error` / `link.error` (inline). `auth` errors return to `phase = "setup"` with `setupError`. `rate` errors set `backoffUntil`.
 
-Polling: every 30 s, when not busy/refreshing, no form open, focus not in `comment`/`form`/`link`, and not backing off: `changedSince(serverFilter, maxUpdatedAt)`; when it returns something newer, background `issues` reload. Every 5 minutes a background `issues` reload regardless. While the drawer is open, the detail is reloaded on the same 30 s tick. Polling stops when the block's pane is gone.
+Polling: every 30 s, when not busy/refreshing, no form open, focus not in `comment`/`form`/`link`, and not backing off: `changedSince(serverFilter, maxUpdatedAt)` (`projectsChangedSince(projectServerFilter, …)` in Projects scope); when it returns something newer, background reload of the scope's data. Every 5 minutes a background reload regardless. While the drawer is open, the detail is reloaded on the same 30 s tick. Polling stops when the block's pane is gone.
 
 Focus: `state.focus` decides which field gets keys. The controller sends `cx:frame({{"focus", view.fieldId(name)}})` when focus changes and `{"focus", tern.json.null}` when it clears; `ev.ev == "focus"` and `ev.ev == "edit"` are mapped back with `view.fieldName(ev.id)`.
 
@@ -170,6 +193,7 @@ Field names: `"search"`, `"setup"`, `"comment"`, `"link"`, `"form:<FormField.nam
 detail.layer(state: BlockState, cx: BlockCx): Node?      -- layer region root (a col holding one overlay keyed "panel") or nil
 detail.fieldId(name: string): string?
 detail.fieldName(id: string): string?
+detail.healthBadge(health: string?): Node?               -- project health badge, shared by cards and the drawer
 ```
 
 ## Actions (view → controller)
@@ -182,12 +206,16 @@ Views attach `actions = { click = "<act>=<value>" }`. Tern splits at the first `
 | `layout=board` / `layout=table` | switch layout |
 | `view=active` / `view=backlog` / `view=all` | switch view |
 | `scope=mine` | issues assigned to me, all teams |
+| `scope=projects` | Projects scope |
 | `team=<teamId>` | team scope |
 | `sort=<key>` | table sort; same key toggles direction |
-| `clear-filters` | priority/assignee/label filters and query cleared |
-| `select=<issueId>` | select and open the drawer |
+| `clear-filters` | priority/assignee/label (or project team/lead) filters and query cleared |
+| `select=<issueId>` | select and open the drawer (a project id in Projects scope) |
 | `close-detail` | close the drawer |
-| `open-url=<issueId>` | `cx:open` only when `issue.url` matches `^https://linear%.app/`; otherwise a notice |
+| `toggle-milestone=<milestoneId>` | expand or collapse a milestone's issue table in the project drawer (`none`: the No milestone group) |
+| `open-issue=<issueId>` | from a milestone table: show that issue in the drawer, staying on the Projects board |
+| `back-to-project` | from such an issue: show its project in the drawer again |
+| `open-url=<issueId>` | `cx:open` only when the issue's (or, in Projects scope, the project's) `url` matches `^https://linear%.app/`; otherwise a notice |
 | `copy-id=<issueId>` / `copy-branch=<issueId>` | `cx:copy` identifier / branch name |
 | `set-state=<stateId>` | update the selected issue's state |
 | `assign-me` / `unassign` | update assignee |
@@ -205,10 +233,12 @@ Views attach `actions = { click = "<act>=<value>" }`. Tern splits at the first `
 
 | Select key | Value |
 | --- | --- |
-| `team-select` | `"mine"` or a team id |
+| `team-select` | `"mine"`, `"projects"` or a team id |
 | `filter-priority` | `""` or `"0"`…`"4"` |
 | `filter-assignee` | `""`, `"me"`, `"none"` or a user id |
 | `filter-label` | `""` or a label id |
+| `filter-project-team` | `""` or a team id (Projects scope) |
+| `filter-project-lead` | `""`, `"me"`, `"none"` or a user id (Projects scope) |
 | `state-select` | state id (selected issue) |
 | `assignee-select` | `""` (unassign) or a user id (selected issue) |
 | `priority-select` | `"0"`…`"4"` (selected issue) |
@@ -224,13 +254,14 @@ The controller routes by `state.focus`. Global keys (no field focused, no ctrl/m
 | --- | --- |
 | `/` | focus search |
 | `1` `2` `3` | view active / backlog / all |
-| `v` | toggle board/table |
+| `v` | toggle board/table (ignored in Projects scope) |
 | `m` | My issues scope |
 | `t` | next team (cycles teams) |
-| `j` / `down`, `k` / `up` | select next / previous visible issue (opens nothing) |
+| `p` | Projects scope |
+| `j` / `down`, `k` / `up` | select next / previous visible issue or project (opens nothing) |
 | `h` / `left`, `l` / `right` | board: first issue of previous / next column |
 | `enter` | open the drawer for the selection (nothing when the drawer is already open) |
-| `escape` | cancel the open form, else the link input, else close the drawer, else clear the selection |
+| `escape` | cancel the open form, else the link input, else go back from an issue opened from a project, else close the drawer, else clear the selection |
 | `n` | create dialog |
 | `e` | edit selected |
 | `c` | focus comment (drawer open) |
@@ -256,27 +287,34 @@ E2E tests, CSS and screenshots rely on these. Every node listed carries `role` (
 | `linear.setup-error` | error line | the error text |
 | `linear.loading` | loading state | `Loading Linear…` |
 | `linear.bar` | top bar row | |
-| `linear.search` | search input | placeholder `Search issues` |
-| `linear.team-select` | scope select | `My issues` or team name |
+| `linear.search` | search input | placeholder `Search issues` (`Search projects` in Projects scope) |
+| `linear.team-select` | scope select | `My issues`, `Projects` or team name |
 | `linear.view-active` / `linear.view-backlog` / `linear.view-all` | view tabs or buttons | `Active`, `Backlog`, `All` |
 | `linear.layout-board` / `linear.layout-table` | layout toggle | `Board`, `Table` |
 | `linear.new` | button | `New issue` |
 | `linear.refresh` | button | `Refresh` (or `Synced 2m ago`) |
 | `linear.error` | error banner | the error text |
 | `linear.notice` | notice line | the notice text |
-| `linear.empty` | empty state | `No issues in this view` (or `No matching issues` when filtered). Unfiltered My issues / Active also shows `Nothing assigned to you is active.` plus **All** and **Choose team** (`focus-team`, which calls `nextTeam`). Filtered empty adds **Clear filters**. |
-| `linear.reloading` | row shown in place of the board while a foreground reload is in flight | `Loading issues…` |
+| `linear.empty` | empty state | `No issues in this view` (or `No matching issues` when filtered). Unfiltered My issues / Active also shows `Nothing assigned to you is active.` plus **All** and **Choose team** (`focus-team`, which calls `nextTeam`). Filtered empty adds **Clear filters**. Projects scope: `No projects in this view` / `No matching projects`. |
+| `linear.reloading` | row shown in place of the board while a foreground reload is in flight | `Loading issues…` (`Loading projects…`) |
 | `linear.board` | board row | |
 | `linear.column` | one column | state name and count |
 | `linear.card` | one issue card | identifier, title |
+| `linear.projects-board` | Projects scope board row | |
+| `linear.project-card` | one project card | name, summary, progress percent, lead |
+| `linear.project-summary`, `linear.project-progress` | project card parts | description; progress bar, `N%`, `Target YYYY-MM-DD` |
 | `linear.table` | table | identifier, title |
-| `linear.drawer` | detail overlay | identifier and title |
+| `linear.drawer` | detail overlay | identifier and title (project: head `Project`, name) |
 | `linear.state-select` / `linear.assignee-select` / `linear.priority-select` | drawer selects | |
 | `linear.assign-me` | button | `Assign to me` |
 | `linear.close-issue` / `linear.reopen` | button | `Mark done` / `Reopen` |
 | `linear.edit` | button | `Edit` |
 | `linear.open-url` | button | `Open in Linear` |
 | `linear.description` | markdown | description |
+| `linear.milestones` | project drawer milestones section | heading `Milestones` |
+| `linear.milestone`, `linear.milestone-head`, `linear.milestone-description` | one milestone; its name, target date and percent; its markdown description | |
+| `linear.milestone-toggle`, `linear.milestone-issues`, `linear.milestone-issue`, `linear.milestone-empty` | milestone expand toggle; its issue table; one issue row (ID, title, status, assignee); empty table | `No milestone` group name; `No issues` |
+| `linear.back-to-project` | drawer button on an issue opened from a project | the project's name |
 | `linear.relations` | relations section | `Blocked by`, `Blocks`, `Related` |
 | `linear.link-input` | link input | placeholder `ENG-123` |
 | `linear.comments` | comments section | heading `Comments` |
@@ -288,9 +326,9 @@ E2E tests, CSS and screenshots rely on these. Every node listed carries `role` (
 | `linear.form-submit` / `linear.form-cancel` | buttons | `Create issue` or `Save` / `Cancel` |
 | `linear.form-error` | form error | the error text |
 | `linear.sign-out` | button, shown only when the key comes from the key file | `Sign out` |
-| `linear.filters`, `linear.filter-priority`, `linear.filter-assignee`, `linear.filter-label`, `linear.clear-filters`, `linear.count` | filter row | `Any priority`, `Any assignee`, `Any label`, `Clear filters`, `N issues` (`Showing first N` when truncated) |
+| `linear.filters`, `linear.filter-priority`, `linear.filter-assignee`, `linear.filter-label`, `linear.clear-filters`, `linear.count` | filter row | `Any priority`, `Any assignee`, `Any label`, `Clear filters`, `N issues` (`Showing first N` when truncated). Projects scope uses `linear.filter-team` (`Any team`) and `linear.filter-lead` (`Any lead`), and counts `N projects`. |
 | `linear.sort`, `linear.sort-<key>` | table sort bar | `Sort`, then one button per sortable column |
-| `linear.column-head`, `linear.column-empty`, `linear.state-dot` | column parts | state name and count; `No issues` |
+| `linear.column-head`, `linear.column-empty`, `linear.state-dot` | column parts | state name and count; `No issues` (`No projects`) |
 | `linear.header`, `linear.title`, `linear.meta`, `linear.actions`, `linear.props`, `linear.prop`, `linear.labels`, `linear.parent`, `linear.unassign` | drawer header, button row and property rows | title, `Unassign`, property labels |
 | `linear.description-empty`, `linear.description-loading` | description placeholders | `No description`, a loading line |
 | `linear.children`, `linear.child` | sub-issues section and rows | `Sub-issues` |

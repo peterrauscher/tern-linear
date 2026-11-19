@@ -442,6 +442,203 @@ check(
 	diff.title == "New title" and diff.priority == "2" and diff.description == nil and diff.assignee == nil
 )
 
+-- ─── projects ───────────────────────────────────────────────────────────────
+
+local function pstatus(statusType: string): types.ProjectStatus
+	return { id = "ps-" .. statusType, name = statusType, type = statusType, color = "#888888", position = 0 }
+end
+
+local ENG_REF: types.TeamRef = { id = "t-eng", key = "ENG", name = "Engineering" }
+local DES_REF: types.TeamRef = { id = "t-des", key = "DES", name = "Design" }
+
+type ProjectOverrides = {
+	name: string?,
+	description: string?,
+	statusType: string?,
+	priority: number?,
+	sortOrder: number?,
+	lead: types.User?,
+	teams: { types.TeamRef }?,
+}
+
+local function project(id: string, overrides: ProjectOverrides?): types.Project
+	local o: ProjectOverrides = overrides or {}
+	return {
+		id = id,
+		slugId = id,
+		name = o.name or id,
+		description = o.description or "",
+		content = nil,
+		priority = o.priority or 0,
+		priorityLabel = "",
+		progress = 0,
+		health = nil,
+		url = "https://linear.app/x/project/" .. id,
+		sortOrder = o.sortOrder or 0,
+		startDate = nil,
+		targetDate = nil,
+		createdAt = "2025-01-01T00:00:00.000Z",
+		updatedAt = "2025-01-01T00:00:00.000Z",
+		completedAt = nil,
+		canceledAt = nil,
+		archivedAt = nil,
+		status = pstatus(o.statusType or "started"),
+		creator = nil,
+		lead = o.lead,
+		teams = o.teams or {},
+		milestones = nil,
+		detailed = false,
+	}
+end
+
+local function pids(projects: { types.Project }): string
+	local out: { string } = {}
+	for _, p in projects do
+		table.insert(out, p.id)
+	end
+	return table.concat(out, " ")
+end
+
+local projectActive: any = model.projectServerFilter(prefs({ scope = "projects", view = "active" }))
+check(
+	"active project view filters planned, started and paused",
+	table.concat(projectActive.status.type["in"], ",") == "planned,started,paused"
+)
+local projectBacklog: any = model.projectServerFilter(prefs({ scope = "projects", view = "backlog" }))
+check(
+	"backlog project view filters the backlog type",
+	#projectBacklog.status.type["in"] == 1 and projectBacklog.status.type["in"][1] == "backlog"
+)
+local projectAll: any = model.projectServerFilter(prefs({ scope = "projects", view = "all" }))
+check(
+	"all project view keeps open projects",
+	table.concat(projectAll["or"][1].status.type.nin, ",") == "completed,canceled"
+)
+check(
+	"all project view keeps recently closed projects",
+	projectAll["or"][2].completedAt.gt == "-P14D" and projectAll["or"][3].canceledAt.gt == "-P14D"
+)
+check(
+	"unknown project view falls back to active",
+	table.concat(model.projectViewTypes("nope"), ",") == "planned,started,paused"
+)
+check(
+	"projectTypeRank and isClosedProjectType",
+	model.projectTypeRank("backlog") == 1
+		and model.projectTypeRank("canceled") == 6
+		and model.isClosedProjectType("completed")
+		and not model.isClosedProjectType("paused")
+)
+
+local pDesktop = project("p-desktop", {
+	name = "Desktop app",
+	description = "Native client",
+	statusType = "started",
+	priority = 2,
+	lead = ANA,
+	teams = { ENG_REF, DES_REF },
+})
+local pUrgent =
+	project("p-urgent", { name = "Urgent infra", statusType = "started", priority = 1, teams = { ENG_REF } })
+local pMobile = project("p-mobile", { name = "Mobile", statusType = "planned", lead = ME, teams = { DES_REF } })
+local pBeta = project("p-beta", { name = "beta", statusType = "started", priority = 2, sortOrder = 5 })
+local pAlpha = project("p-alpha", { name = "Alpha", statusType = "started", priority = 2, sortOrder = 5 })
+local pDone = project("p-done", { name = "Legacy", statusType = "completed", lead = ANA })
+local projectPool = { pBeta, pDone, pMobile, pDesktop, pAlpha, pUrgent, pDesktop }
+local projectPrefs = prefs({ scope = "projects", view = "all" })
+
+check(
+	"visibleProjects orders by status, priority, sortOrder, name and drops duplicates",
+	pids(model.visibleProjects(projectPool, projectPrefs, "", nil))
+		== "p-mobile p-urgent p-desktop p-alpha p-beta p-done"
+)
+check(
+	"project query matches the name",
+	pids(model.visibleProjects(projectPool, projectPrefs, "  URGENT ", nil)) == "p-urgent"
+)
+check(
+	"project query matches the description",
+	pids(model.visibleProjects(projectPool, projectPrefs, "native", nil)) == "p-desktop"
+)
+check(
+	"project query matches team key and name",
+	pids(model.visibleProjects(projectPool, projectPrefs, "des", nil)) == "p-mobile p-desktop"
+		and pids(model.visibleProjects(projectPool, projectPrefs, "engineering", nil)) == "p-urgent p-desktop"
+)
+check(
+	"project query matches the lead",
+	pids(model.visibleProjects(projectPool, projectPrefs, "peter", nil)) == "p-mobile"
+)
+check(
+	"project team filter",
+	pids(model.visibleProjects(projectPool, prefs({ projectTeamId = "t-des" }), "", nil)) == "p-mobile p-desktop"
+)
+check(
+	"project lead filter me",
+	pids(model.visibleProjects(projectPool, prefs({ projectLead = "me" }), "", "u-me")) == "p-mobile"
+)
+check(
+	"project lead filter me without a viewer matches nothing",
+	pids(model.visibleProjects(projectPool, prefs({ projectLead = "me" }), "", nil)) == ""
+)
+check(
+	"project lead filter none",
+	pids(model.visibleProjects(projectPool, prefs({ projectLead = "none" }), "", nil)) == "p-urgent p-alpha p-beta"
+)
+check(
+	"project lead filter by id",
+	pids(model.visibleProjects(projectPool, prefs({ projectLead = "u-ana" }), "", nil)) == "p-desktop p-done"
+)
+check(
+	"project filters combine",
+	pids(model.visibleProjects(projectPool, prefs({ projectTeamId = "t-eng", projectLead = "u-ana" }), "", nil))
+		== "p-desktop"
+)
+
+local projectColumns = model.projectColumns(model.visibleProjects(projectPool, projectPrefs, "", nil), "all")
+local projectTitles: { string } = {}
+for _, column in projectColumns do
+	table.insert(projectTitles, `{column.title}:{#column.projects}`)
+end
+check(
+	"project columns follow the status types, empty ones included",
+	table.concat(projectTitles, ",") == "Backlog:0,Planned:1,In Progress:4,Paused:0,Completed:1,Canceled:0"
+)
+check(
+	"project columns carry the status type and keep order",
+	projectColumns[3].id == "started"
+		and projectColumns[3].statusType == "started"
+		and pids(projectColumns[3].projects) == "p-urgent p-desktop p-alpha p-beta"
+)
+
+local activeProjectColumns = model.projectColumns(model.visibleProjects(projectPool, prefs(), "", nil), "active")
+check(
+	"active project view hides backlog and closed columns",
+	#activeProjectColumns == 3
+		and activeProjectColumns[1].title == "Planned"
+		and activeProjectColumns[3].title == "Paused"
+		and #activeProjectColumns[2].projects == 4
+)
+local emptyProjects = model.projectColumns({}, "backlog")
+check(
+	"an empty project board keeps its shape",
+	#emptyProjects == 1 and emptyProjects[1].title == "Backlog" and #emptyProjects[1].projects == 0
+)
+
+check(
+	"progressPercent rounds and clamps",
+	model.progressPercent(0) == 0
+		and model.progressPercent(0.654) == 65
+		and model.progressPercent(0.006) == 1
+		and model.progressPercent(1) == 100
+		and model.progressPercent(1.5) == 100
+		and model.progressPercent(-0.2) == 0
+)
+check(
+	"health labels and project titles",
+	model.HEALTH_LABELS.atRisk == "At risk" and model.PROJECT_TYPE_TITLES.started == "In Progress"
+)
+
 if failures > 0 then
 	error(`{failures} model test(s) failed`)
 end

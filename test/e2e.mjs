@@ -295,6 +295,136 @@ async function scenario() {
 		await runner.shot(label);
 	});
 
+	await runner.step("projects-view", async (label) => {
+		const before = mark();
+		await t.key("p");
+		await t.waitFor(role("team-select"), "Projects");
+		await present(role("projects-board"));
+		await see("Desktop app");
+		await see("Mobile companion");
+		await gone("Legacy sync deprecation");
+		await waitFor(() => opsSince(before, "Projects").length > 0, { what: "a Projects request" });
+		const cards = await nodesOf(role("project-card"));
+		if (!cards.some((card) => (card.text ?? "").includes("Desktop app"))) throw new Error("no project card for Desktop app");
+		if (!cards.some((card) => (card.text ?? "").includes("Mobile companion"))) throw new Error("no project card for Mobile companion");
+		await runner.shot(label);
+
+		// The All view adds projects completed within the last 14 days.
+		await t.key("3");
+		await see("Legacy sync deprecation");
+		await t.key("1");
+		await gone("Legacy sync deprecation");
+		await see("Desktop app");
+
+		// Search narrows the cards by name and by lead.
+		await search("mobile");
+		await see("Mobile companion");
+		await gone("Desktop app");
+		await clearSearch("mobile".length);
+		await see("Desktop app");
+		await search("grace");
+		await see("Desktop app");
+		await gone("Mobile companion");
+		await clearSearch("grace".length);
+		await see("Mobile companion");
+
+		// Open the Desktop app project: the drawer lists its milestones with their descriptions.
+		await search("desktop");
+		await gone("Mobile companion");
+		const detail = mark();
+		await t.click(role("project-card"));
+		await present(role("drawer"));
+		await waitFor(() => opsSince(detail, "Project").length > 0, { what: "the Project detail request" });
+		await t.waitFor(role("drawer"), "opens large workspaces instantly");
+		await present(role("milestones"));
+		for (const milestone of ["Alpha indexer", "Keyboard & board polish", "GA release"]) {
+			await t.waitFor(role("milestones"), milestone);
+		}
+		await t.waitFor(role("milestones"), "The incremental file indexer lands behind a feature flag");
+		await t.waitFor(role("milestones"), "Signed installers, release notes and the public download page");
+		await runner.shot("projects-detail");
+
+		await closeDrawer();
+		await clearSearch("desktop".length);
+		await t.key("m");
+		await see("Crash when opening large workspace");
+		await present(role("board"));
+		await absent(role("projects-board"));
+	});
+
+	await runner.step("project-milestone-issues", async (label) => {
+		await t.key("p");
+		await t.waitFor(role("team-select"), "Projects");
+		await present(role("projects-board"));
+		await search("desktop");
+		await gone("Mobile companion");
+		const before = mark();
+		await t.click(role("project-card"));
+		await present(role("drawer"));
+		await t.waitFor(role("milestones"), "GA release");
+		// Milestone progress arrives as a percentage; "Keyboard & board polish" is 55% done, not 100%.
+		await t.waitFor(role("milestones"), "55%");
+		const loaded = await waitFor(() => opsSince(before, "ProjectIssues")[0], { what: "the ProjectIssues request" });
+		if (typeof loaded.variables.id !== "string" || loaded.variables.id === "") throw new Error("ProjectIssues was sent without a project id");
+
+		// Milestone issue tables are collapsed until their head is clicked.
+		await absent(role("milestone-issue"));
+		const identifiersShown = async () =>
+			(await nodesOf(role("milestone-issue"))).map((node) => /^[A-Z]+-\d+/.exec(node.text ?? "")?.[0]).sort();
+		const nextToggle = "[data-role='linear.milestone-toggle']:not([data-mark='expanded'])";
+		const expectIdentifiers = async (expected) => {
+			await waitFor(async () => (await t.wait(150), (await identifiersShown()).join() === [...expected].sort().join()), {
+				what: `milestone issue rows ${expected.join(", ")}`,
+				interval: 0,
+			}).catch(async (error) => {
+				throw new Error(`${error.message}; shown: ${(await identifiersShown()).join(", ")}`);
+			});
+		};
+
+		// Alpha indexer, then Keyboard & board polish, then GA release, then No milestone (in head order).
+		await t.click(nextToggle);
+		await expectIdentifiers(["ENG-142", "ENG-140"]);
+		await t.click(nextToggle);
+		await expectIdentifiers(["ENG-142", "ENG-140", "ENG-138", "DES-12"]);
+		await t.click(nextToggle);
+		await expectIdentifiers(["ENG-142", "ENG-140", "ENG-138", "DES-12", "ENG-146"]);
+		await t.click(nextToggle);
+		await expectIdentifiers(["ENG-142", "ENG-140", "ENG-138", "DES-12", "ENG-146", "ENG-139", "ENG-131"]);
+		const crash = (await nodesOf(role("milestone-issue"))).find((row) => (row.text ?? "").startsWith("ENG-142"));
+		if (!crash?.text.includes("Crash when opening large workspace")) throw new Error("ENG-142 row shows no title");
+		await t.waitFor(role("milestones"), "No milestone");
+		await runner.shot(label);
+
+		// A row opens that issue in the drawer, staying on the projects board; Escape returns to the project.
+		const detail = mark();
+		const target = (await nodesOf(role("milestone-issue"))).find((row) => (row.text ?? "").startsWith("DES-12"));
+		const [x, y, width, height] = target.rect;
+		await t.ctl(`click ${x + width / 2} ${y + height / 2}`);
+		await t.waitFor(role("drawer"), "DES-12");
+		await t.waitFor(role("drawer"), issueNamed("DES-12").title);
+		await waitFor(() => opsSince(detail, "Issue").length > 0, { what: "the Issue detail request" });
+		await t.waitFor(role("back-to-project"), "Desktop app");
+		await t.waitFor(role("team-select"), "Projects");
+		await present(role("projects-board"));
+		if (opsSince(detail, "Issues").length > 0) throw new Error("opening a milestone issue reloaded an issue board");
+		// The issue drawer stays put after the board settles.
+		await t.wait(500);
+		await t.waitFor(role("drawer"), "DES-12");
+		await runner.shot("project-milestone-issue-drawer");
+
+		await t.key("escape");
+		await t.waitFor(role("drawer"), "GA release");
+		await absent(role("back-to-project"));
+		await present(role("milestone-issue"));
+
+		await closeDrawer();
+		await clearSearch("desktop".length);
+		await t.key("m");
+		await see("Crash when opening large workspace");
+		await present(role("board"));
+		await absent(role("projects-board"));
+	});
+
 	await runner.step("readme-shots", async () => {
 		// A fresh window on pristine data, signed in through the environment: no leftover notices or filters.
 		operations = mock.log.map((entry) => entry.operationName);
